@@ -1,0 +1,73 @@
+# Root .gitignore - ignore generated build artifacts across subdirectories
+
+# Generic build directories
+build/
+build-*/
+cmake-build-*/
+**/build/
+apache-activemq*/
+activemq-cpp-library*/
+nats-server*/
+
+# CMake artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.cmake
+
+# Compiled objects and libraries
+*.o
+*.obj
+*.so
+*.a
+*.lib
+*.dll
+*.dylib
+*.exe
+*.out
+
+# Binaries and libs
+bin/
+lib/
+
+# Protobuf / generated sources
+*_pb.h
+*_pb.cc
+*_grpc.pb.h
+*_grpc.pb.cc
+
+# Common dependency directories created by external build scripts
+deps/
+_deps/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+ENV/
+
+# Logs and temporary
+*.log
+*.tmp
+*.pid
+*.dump
+*.rdb
+report*.json
+report*.txt
+run_log*.txt
+delete_prep.txt
+TODO.*
+*.tar.gz
+*.zip
+
+# Coverage and test artifacts
+.cache/
+.pytest_cache/
+.coverage

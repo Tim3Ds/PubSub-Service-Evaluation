@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package test_data;
+
+service TestDataService {
+  rpc TransferData (TestDataItem) returns (Ack);
+}
+
+message TestDataItem {
+  int32 message_id = 1;
+  string message_name = 2;
+  repeated string message_value = 3;
+  int32 target = 4;
+}
+
+message Ack {
+  int32 message_id = 1;
+  string status = 2;
+  int32 receiver_id = 3;
+}

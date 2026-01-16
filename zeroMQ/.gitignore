@@ -1,0 +1,65 @@
+# ZeroMQ specific .gitignore
+
+# Generic build directories
+build/
+build-*/
+cmake-build-*/
+**/build/
+
+# CMake artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.cmake
+
+# Make artifacts
+Makefile
+
+# Compiled objects and libraries
+*.o
+*.obj
+*.so
+*.a
+*.lib
+*.dll
+*.dylib
+*.exe
+*.out
+
+# Binaries and libs
+bin/
+lib/
+
+# Protobuf / generated sources
+*_pb.h
+*_pb.cc
+*_grpc.pb.h
+*_grpc.pb.cc
+
+# Common dependency directories created by external build scripts
+deps/
+_deps/
+libzmq*/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+ENV/
+
+# Logs and temporary
+*.log
+*.tmp
+*.pid
+
+# Coverage and test artifacts
+.cache/
+.pytest_cache/
+.coverage
