@@ -59,9 +59,15 @@ def main():
         except zmq.error.Again:
             stats.record_message(False)
             print(" [FAILED] Timeout")
+            # Close poisoned REQ socket
+            socket.close()
+            del sockets[target]
         except Exception as e:
             stats.record_message(False)
             print(f" [FAILED] Error: {e}")
+            # Close poisoned REQ socket on any error to be safe
+            socket.close()
+            del sockets[target]
 
     stats.end_time = get_current_time_ms()
     

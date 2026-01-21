@@ -101,11 +101,19 @@ int main() {
             } else {
                 stats.record_message(false);
                 std::cout << " [FAILED] Timeout" << std::endl;
+                // Close poisoned REQ socket
+                socket->close();
+                delete socket;
+                sockets.erase(target);
             }
 
         } catch (const std::exception& e) {
             stats.record_message(false);
             std::cout << " [FAILED] Error: " << e.what() << std::endl;
+            // Close poisoned REQ socket on any error
+            socket->close();
+            delete socket;
+            sockets.erase(target);
         }
     }
 
