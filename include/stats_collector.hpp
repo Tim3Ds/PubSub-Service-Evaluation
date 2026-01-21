@@ -18,7 +18,7 @@ public:
         if (success) {
             received_count++;
             processed_count++;
-            if (timing_ms > 0) {
+            if (timing_ms >= 0) {
                 message_timings.push_back(timing_ms);
             }
         } else {

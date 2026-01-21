@@ -9,6 +9,7 @@
 #include <chrono>
 #include <vector>
 #include "../../include/json.hpp"
+#include "../../include/stats_collector.hpp"
 
 using json = nlohmann::json;
 
@@ -38,27 +39,19 @@ int main() {
 
     std::string callback_queue = "callback_" + generate_uuid();
 
-    struct {
-        int sent = 0;
-        int received = 0;
-        int processed = 0;
-        int failed = 0;
-        long long start_time;
-        long long end_time;
-    } stats;
-
-    stats.start_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-
     std::cout << " [x] Starting transfer of " << test_data.size() << " messages..." << std::endl;
 
+    MessageStats stats;
+    long long global_start = get_current_time_ms();
+    stats.set_duration(global_start, 0);
+
     for (auto& item : test_data) {
-        stats.sent++;
         int target = item.value("target", 0);
         std::string queue_name = "test_queue_" + std::to_string(target);
         
         std::cout << " [x] Sending message " << item["message_id"] << " to target " << target << "..." << std::flush;
         
+        long long msg_start = get_current_time_ms();
         item["reply_to"] = callback_queue;
         std::string body = item.dump();
 
@@ -73,45 +66,46 @@ int main() {
                 json resp_data = json::parse(reply_str);
                 
                 if (resp_data["status"] == "ACK" && resp_data["message_id"] == item["message_id"]) {
-                    stats.received++;
-                    stats.processed++;
+                    long long msg_duration = get_current_time_ms() - msg_start;
+                    stats.record_message(true, msg_duration);
                     std::cout << " [OK]" << std::endl;
                 } else {
-                    stats.failed++;
+                    stats.record_message(false);
                     std::cout << " [FAILED] Unexpected response" << std::endl;
                 }
             } catch (...) {
-                stats.failed++;
+                stats.record_message(false);
                 std::cout << " [FAILED] Parse error" << std::endl;
             }
         } else {
-            stats.failed++;
+            stats.record_message(false);
             std::cout << " [FAILED] Timeout" << std::endl;
         }
         if (pop_reply) freeReplyObject(pop_reply);
     }
 
-    stats.end_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    long long global_end = get_current_time_ms();
+    stats.set_duration(global_start, global_end);
     
-    double duration = stats.end_time - stats.start_time;
-    
-    json report;
+    json report = stats.get_stats();
     report["service"] = "Redis";
     report["language"] = "C++";
-    report["total_sent"] = stats.sent;
-    report["total_received"] = stats.received;
-    report["total_processed"] = stats.processed;
-    report["total_failed"] = stats.failed;
-    report["duration_ms"] = duration;
-    report["processed_per_ms"] = duration > 0 ? stats.processed / duration : 0;
-    report["failed_per_ms"] = duration > 0 ? stats.failed / duration : 0;
 
     std::cout << "\nTest Results:" << std::endl;
-    std::cout << report.dump(4) << std::endl;
+    std::cout << "service: Redis" << std::endl;
+    std::cout << "language: C++" << std::endl;
+    std::cout << "total_sent: " << stats.sent_count << std::endl;
+    std::cout << "total_received: " << stats.received_count << std::endl;
+    std::cout << "duration_ms: " << stats.get_duration_ms() << std::endl;
+    if (report.contains("message_timing_stats")) {
+        std::cout << "message_timing_stats: " << report["message_timing_stats"].dump() << std::endl;
+    }
 
-    std::ofstream rf("/home/tim/repos/report.txt", std::ios::app);
-    rf << report.dump() << std::endl;
+    std::ofstream rf("report.txt", std::ios::app);
+    if (rf.good()) {
+        rf << report.dump() << std::endl;
+        rf.close();
+    }
 
     redisFree(c);
     return 0;

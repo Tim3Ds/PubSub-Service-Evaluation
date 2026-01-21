@@ -88,15 +88,22 @@ public:
     }
 };
 
-int main() {
+int main(int argc, char** argv) {
+    int id = 0;
+    for (int i = 1; i < argc; ++i) {
+        if (string(argv[i]) == "--id" && i + 1 < argc) {
+            id = stoi(argv[i+1]);
+        }
+    }
+
     activemq::library::ActiveMQCPP::initializeLibrary();
 
     try {
         string brokerURI = "tcp://localhost:61616";
-        string destName = "test_request_cpp";
+        string destName = "test_queue_" + to_string(id);
 
         TestDataReceiver receiver(brokerURI, destName);
-        cout << " [x] Awaiting ActiveMQ requests (C++)" << endl;
+        cout << " [x] Receiver " << id << " awaiting ActiveMQ requests on " << destName << " (C++)" << endl;
 
         CountDownLatch latch(1);
         latch.await();

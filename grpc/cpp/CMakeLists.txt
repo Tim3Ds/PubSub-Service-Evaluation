@@ -3,6 +3,9 @@ project(grpc_pubsub)
 
 set(CMAKE_CXX_STANDARD 17)
 
+# Set default output directory for executables
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 find_package(Protobuf REQUIRED)
 find_package(gRPC REQUIRED)
 

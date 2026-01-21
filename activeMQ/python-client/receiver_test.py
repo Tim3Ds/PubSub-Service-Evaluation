@@ -42,7 +42,7 @@ def main():
     args = parser.parse_args()
     
     receiver_id = args.id
-    destination = f'/queue/test_request_{receiver_id}'
+    destination = f'/queue/test_queue_{receiver_id}'
     
     conn = stomp.Connection(host_and_ports=[('localhost', 61613)])
     receiver = ActiveMQReceiver(conn, receiver_id)

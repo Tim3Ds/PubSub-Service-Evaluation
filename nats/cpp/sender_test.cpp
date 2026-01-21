@@ -3,7 +3,9 @@
 #include <fstream>
 #include <string>
 #include <chrono>
+#include <vector>
 #include "../../include/json.hpp"
+#include "../../include/stats_collector.hpp"
 
 using json = nlohmann::json;
 
@@ -12,30 +14,42 @@ int main() {
     natsStatus s = natsConnection_ConnectTo(&conn, "nats://localhost:4222");
     if (s != NATS_OK) return 1;
 
-    std::ifstream f("../../test_data.json");
+    std::string data_path = "test_data.json";
+    std::ifstream f(data_path);
+    if (!f.good()) {
+        data_path = "../../test_data.json";
+        f.close();
+        f.open(data_path);
+    }
+    if (!f.good()) {
+        data_path = "/home/tim/repos/test_data.json";
+        f.close();
+        f.open(data_path);
+    }
+    
+    if (!f.good()) {
+        std::cerr << " [!] Could not find test_data.json" << std::endl;
+        return 1;
+    }
+    
     json test_data = json::parse(f);
 
-    struct {
-        int sent = 0;
-        int received = 0;
-        int processed = 0;
-        int failed = 0;
-        long long start_time;
-        long long end_time;
-    } stats;
-
-    stats.start_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    MessageStats stats;
+    long long start_time = get_current_time_ms();
+    stats.set_duration(start_time, 0);
 
     std::cout << " [x] Starting transfer of " << test_data.size() << " messages..." << std::endl;
 
     for (auto& item : test_data) {
-        stats.sent++;
         std::cout << " [x] Sending message " << item["message_id"] << " (" << item["message_name"] << ")..." << std::flush;
         
+        int target = item.value("target", 0);
+        std::string subject = "test.receiver." + std::to_string(target);
+        
+        long long msg_start = get_current_time_ms();
         natsMsg *reply = NULL;
         std::string body = item.dump();
-        s = natsConnection_Request(&reply, conn, "test_subject", body.c_str(), (int)body.size(), 2000);
+        s = natsConnection_Request(&reply, conn, subject.c_str(), body.c_str(), (int)body.size(), 2000);
         
         if (s == NATS_OK) {
             try {
@@ -43,45 +57,48 @@ int main() {
                 json resp_data = json::parse(reply_str);
                 
                 if (resp_data["status"] == "ACK" && resp_data["message_id"] == item["message_id"]) {
-                    stats.received++;
-                    stats.processed++;
+                    long long msg_duration = get_current_time_ms() - msg_start;
+                    stats.record_message(true, msg_duration);
                     std::cout << " [OK]" << std::endl;
                 } else {
-                    stats.failed++;
+                    stats.record_message(false);
                     std::cout << " [FAILED] Unexpected response" << std::endl;
                 }
             } catch (...) {
-                stats.failed++;
+                stats.record_message(false);
                 std::cout << " [FAILED] Parse error" << std::endl;
             }
             natsMsg_Destroy(reply);
         } else {
-            stats.failed++;
+            stats.record_message(false);
             std::cout << " [FAILED] Timeout or error: " << natsStatus_GetText(s) << std::endl;
         }
     }
 
-    stats.end_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    long long end_time = get_current_time_ms();
+    stats.set_duration(start_time, end_time);
     
-    double duration = stats.end_time - stats.start_time;
-    
-    json report;
+    json report = stats.get_stats();
     report["service"] = "NATS";
     report["language"] = "C++";
-    report["total_sent"] = stats.sent;
-    report["total_received"] = stats.received;
-    report["total_processed"] = stats.processed;
-    report["total_failed"] = stats.failed;
-    report["duration_ms"] = duration;
-    report["processed_per_ms"] = duration > 0 ? stats.processed / duration : 0;
-    report["failed_per_ms"] = duration > 0 ? stats.failed / duration : 0;
 
     std::cout << "\nTest Results:" << std::endl;
-    std::cout << report.dump(4) << std::endl;
+    std::cout << "service: NATS" << std::endl;
+    std::cout << "language: C++" << std::endl;
+    std::cout << "total_sent: " << stats.sent_count << std::endl;
+    std::cout << "total_received: " << stats.received_count << std::endl;
+    std::cout << "duration_ms: " << stats.get_duration_ms() << std::endl;
+    if (report.contains("message_timing_stats")) {
+        std::cout << "message_timing_stats: " << report["message_timing_stats"].dump() << std::endl;
+    }
 
-    std::ofstream rf("../../report.txt", std::ios::app);
-    rf << report.dump() << std::endl;
+    std::ofstream rf("report.txt", std::ios::app);
+    if (rf.good()) {
+        rf << report.dump() << std::endl;
+        rf.close();
+    } else {
+        std::cerr << " [!] Warning: Could not write to report file" << std::endl;
+    }
 
     natsConnection_Destroy(conn);
     return 0;

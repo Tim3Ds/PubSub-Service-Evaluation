@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <algorithm>
+#include <cmath>
 #include <grpcpp/grpcpp.h>
 #include "test_data.grpc.pb.h"
 #include "../../include/json.hpp"
@@ -122,8 +124,12 @@ int main() {
         std::cout << "total_sent: " << stats.sent_count << std::endl;
         std::cout << "total_received: " << stats.received_count << std::endl;
         std::cout << "duration_ms: " << stats.get_duration_ms() << std::endl;
+        
+        if (report.contains("message_timing_stats")) {
+            std::cout << "message_timing_stats: " << report["message_timing_stats"].dump() << std::endl;
+        }
 
-        std::ofstream report_file("../../report.txt", std::ios_base::app);
+        std::ofstream report_file("report.txt", std::ios_base::app);
         if (report_file.good()) {
             report_file << report.dump() << std::endl;
             report_file.close();

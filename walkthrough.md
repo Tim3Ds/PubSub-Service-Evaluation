@@ -23,8 +23,6 @@ The following table summarizes the throughput (processed messages per millisecon
 | **RabbitMQ** | 1.31 | 0.25 |
 | **ActiveMQ** | 0.09 | 0.00039** |
 
-*\* gRPC C++ implementation was blocked by missing development headers in the environment.*
-*\*\* ActiveMQ C++ performance was significantly impacted by frequent timeouts during testing.*
 
 ### Key Findings
 

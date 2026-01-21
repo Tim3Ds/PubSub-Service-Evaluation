@@ -1,7 +1,7 @@
 #include <zmq.hpp>
 #include <iostream>
 #include <string>
-#include <signal>
+#include <csignal>
 #include <atomic>
 #include "../../include/json.hpp"
 

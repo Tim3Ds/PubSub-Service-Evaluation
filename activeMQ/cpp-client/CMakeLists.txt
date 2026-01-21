@@ -14,17 +14,17 @@ pkg_check_modules(ACTIVEMQCPP activemq-cpp)
 
 if(ACTIVEMQCPP_FOUND)
   include_directories(${ACTIVEMQCPP_INCLUDE_DIRS})
-  link_directories(${ACTIVEMQCPP_LIBRARY_DIRS})
+  link_directories(${ACTIVEMQCPP_LIBRARY_DIRS} ${CMAKE_SOURCE_DIR}/lib_fix)
 else()
   # Allow user to point to installed headers/libs via environment
   include_directories(/usr/local/include)
-  link_directories(/usr/local/lib)
+  link_directories(/usr/local/lib ${CMAKE_SOURCE_DIR}/lib_fix)
 endif()
 
 add_executable(sender_test sender_test.cpp)
-target_link_libraries(sender_test ${ACTIVEMQCPP_LIBRARIES} /usr/lib64/libuuid.so.1 stdc++ pthread)
+target_link_libraries(sender_test ${ACTIVEMQCPP_LIBRARIES} uuid stdc++ pthread)
 
 add_executable(receiver_test receiver_test.cpp)
-target_link_libraries(receiver_test ${ACTIVEMQCPP_LIBRARIES} /usr/lib64/libuuid.so.1 stdc++ pthread)
+target_link_libraries(receiver_test ${ACTIVEMQCPP_LIBRARIES} uuid stdc++ pthread)
 
 

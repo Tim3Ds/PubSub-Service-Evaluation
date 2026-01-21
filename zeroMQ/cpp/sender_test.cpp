@@ -124,8 +124,11 @@ int main() {
     std::cout << "total_sent: " << stats.sent_count << std::endl;
     std::cout << "total_received: " << stats.received_count << std::endl;
     std::cout << "duration_ms: " << stats.get_duration_ms() << std::endl;
+    if (report.contains("message_timing_stats")) {
+        std::cout << "message_timing_stats: " << report["message_timing_stats"].dump() << std::endl;
+    }
 
-    std::ofstream rf("../../report.txt", std::ios::app);
+    std::ofstream rf("report.txt", std::ios::app);
     if (rf.good()) {
         rf << report.dump() << std::endl;
         rf.close();

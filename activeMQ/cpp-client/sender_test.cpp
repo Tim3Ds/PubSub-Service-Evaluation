@@ -24,13 +24,19 @@ using namespace decaf::util::concurrent;
 using namespace decaf::lang;
 using namespace cms;
 using namespace std;
+#include "../../include/stats_collector.hpp"
+
+using namespace activemq::core;
+using namespace decaf::util::concurrent;
+using namespace decaf::lang;
+using namespace cms;
+using namespace std;
 using json = nlohmann::json;
 
 class TestDataSender : public MessageListener {
 private:
     Connection* connection;
     Session* session;
-    Destination* destination;
     Destination* replyDestination;
     MessageProducer* producer;
     MessageConsumer* consumer;
@@ -40,10 +46,9 @@ private:
     int corrCounter;
 
 public:
-    TestDataSender(const string& brokerURI, const string& destName) {
+    TestDataSender(const string& brokerURI) {
         connection = NULL;
         session = NULL;
-        destination = NULL;
         replyDestination = NULL;
         producer = NULL;
         consumer = NULL;
@@ -55,10 +60,9 @@ public:
         connection->start();
 
         session = connection->createSession(Session::AUTO_ACKNOWLEDGE);
-        destination = session->createQueue(destName);
         replyDestination = session->createTemporaryQueue();
 
-        producer = session->createProducer(destination);
+        producer = session->createProducer(NULL);
         producer->setDeliveryMode(DeliveryMode::NON_PERSISTENT);
 
         consumer = session->createConsumer(replyDestination);
@@ -73,10 +77,10 @@ public:
         try {
             if (connection != NULL) connection->close();
         } catch (CMSException& e) {}
-        delete destination;
         delete replyDestination;
         delete producer;
         delete consumer;
+        delete session;
         delete connection;
     }
 
@@ -90,7 +94,7 @@ public:
         }
     }
 
-    string sendAndWait(const string& msgBody) {
+    string sendAndWait(int target_id, const string& msgBody) {
         response = "";
         currentCorrId = "corr-cpp-" + to_string(++corrCounter);
         latch = new CountDownLatch(1);
@@ -99,7 +103,9 @@ public:
         message->setCMSReplyTo(replyDestination);
         message->setCMSCorrelationID(currentCorrId);
 
-        producer->send(message.get());
+        string destName = "test_queue_" + to_string(target_id);
+        auto_ptr<Destination> destination(session->createQueue(destName));
+        producer->send(destination.get(), message.get());
 
         if (latch->await(5000)) {
             delete latch;
@@ -118,77 +124,84 @@ int main() {
 
     try {
         string brokerURI = "tcp://localhost:61616";
-        string destName = "test_request_cpp";
+        TestDataSender client(brokerURI);
 
-        TestDataSender client(brokerURI, destName);
-
-        ifstream f("../../test_data.json");
+        string data_path = "test_data.json";
+        ifstream f(data_path);
+        if (!f.good()) {
+            f.close();
+            data_path = "../../test_data.json";
+            f.open(data_path);
+        }
+        if (!f.good()) {
+            f.close();
+            data_path = "/home/tim/repos/test_data.json";
+            f.open(data_path);
+        }
+        
+        if (!f.good()) {
+            cerr << " [!] Could not find test_data.json" << endl;
+            activemq::library::ActiveMQCPP::shutdownLibrary();
+            return 1;
+        }
+        
         json test_data = json::parse(f);
 
-        struct {
-            int sent = 0;
-            int received = 0;
-            int processed = 0;
-            int failed = 0;
-            long long start_time;
-            long long end_time;
-        } stats;
-
-        stats.start_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
+        MessageStats stats;
+        long long start_time = get_current_time_ms();
+        stats.set_duration(start_time, 0);
 
         cout << " [x] Starting transfer of " << test_data.size() << " messages..." << endl;
 
-        int count = 0;
         for (auto& item : test_data) {
-            if (++count > 50) break;
-            stats.sent++;
-
-            cout << " [x] Sending message " << item["message_id"] << " (" << item["message_name"] << ")..." << flush;
+            int target = item.value("target", 0);
+            cout << " [x] Sending message " << item["message_id"] << " to target " << target << "..." << flush;
             
-            string response = client.sendAndWait(item.dump());
+            long long msg_start = get_current_time_ms();
+            string response = client.sendAndWait(target, item.dump());
             if (response != "") {
                 try {
                     json resp_data = json::parse(response);
                     if (resp_data["status"] == "ACK" && resp_data["message_id"] == item["message_id"]) {
-                        stats.received++;
-                        stats.processed++;
+                        long long msg_duration = get_current_time_ms() - msg_start;
+                        stats.record_message(true, msg_duration);
                         cout << " [OK]" << endl;
                     } else {
-                        stats.failed++;
+                        stats.record_message(false);
                         cout << " [FAILED] Unexpected response" << endl;
                     }
                 } catch (...) {
-                    stats.failed++;
+                    stats.record_message(false);
                     cout << " [FAILED] Parse error" << endl;
                 }
             } else {
-                stats.failed++;
+                stats.record_message(false);
                 cout << " [FAILED] Timeout" << endl;
             }
         }
 
-        stats.end_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
+        long long end_time = get_current_time_ms();
+        stats.set_duration(start_time, end_time);
         
-        double duration = (double)(stats.end_time - stats.start_time);
-        
-        json report;
+        json report = stats.get_stats();
         report["service"] = "ActiveMQ";
         report["language"] = "C++";
-        report["total_sent"] = stats.sent;
-        report["total_received"] = stats.received;
-        report["total_processed"] = stats.processed;
-        report["total_failed"] = stats.failed;
-        report["duration_ms"] = duration;
-        report["processed_per_ms"] = duration > 0 ? stats.processed / duration : 0;
-        report["failed_per_ms"] = duration > 0 ? stats.failed / duration : 0;
 
         cout << "\nTest Results:" << endl;
-        cout << report.dump(4) << endl;
+        cout << "service: ActiveMQ" << endl;
+        cout << "language: C++" << endl;
+        cout << "total_sent: " << stats.sent_count << endl;
+        cout << "total_received: " << stats.received_count << endl;
+        cout << "duration_ms: " << stats.get_duration_ms() << endl;
+        if (report.contains("message_timing_stats")) {
+            cout << "message_timing_stats: " << report["message_timing_stats"].dump() << endl;
+        }
 
-        ofstream rf("../../report.txt", ios::app);
-        rf << report.dump() << endl;
+        ofstream rf("report.txt", ios::app);
+        if (rf.good()) {
+            rf << report.dump() << endl;
+            rf.close();
+        }
 
     } catch (CMSException& e) {
         e.printStackTrace();

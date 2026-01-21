@@ -7,7 +7,14 @@
 
 using json = nlohmann::json;
 
-int main() {
+int main(int argc, char** argv) {
+    int id = 0;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--id" && i + 1 < argc) {
+            id = std::stoi(argv[i+1]);
+        }
+    }
+
     amqp_connection_state_t conn = amqp_new_connection();
     amqp_socket_t *socket = amqp_tcp_socket_new(conn);
     if (!socket) {
@@ -30,13 +37,15 @@ int main() {
     amqp_channel_open(conn, 1);
     amqp_get_rpc_reply(conn);
 
-    amqp_queue_declare(conn, 1, amqp_cstring_bytes("test_queue_cpp"), 0, 0, 0, 0, amqp_empty_table);
+    std::string queue_name = "test_queue_" + std::to_string(id);
+
+    amqp_queue_declare(conn, 1, amqp_cstring_bytes(queue_name.c_str()), 0, 0, 0, 0, amqp_empty_table);
     amqp_get_rpc_reply(conn);
 
-    amqp_basic_consume(conn, 1, amqp_cstring_bytes("test_queue_cpp"), amqp_empty_bytes, 0, 0, 0, amqp_empty_table);
+    amqp_basic_consume(conn, 1, amqp_cstring_bytes(queue_name.c_str()), amqp_empty_bytes, 0, 0, 0, amqp_empty_table);
     amqp_get_rpc_reply(conn);
 
-    std::cout << " [x] Awaiting RPC requests" << std::endl;
+    std::cout << " [x] Receiver " << id << " awaiting RPC requests on " << queue_name << std::endl;
 
     while (1) {
         amqp_rpc_reply_t res;

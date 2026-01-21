@@ -18,7 +18,22 @@ class ActiveMQSender(stomp.ConnectionListener):
     def __init__(self, host='localhost', port=61613):
         self.conn = stomp.Connection(host_and_ports=[(host, port)])
         self.conn.set_listener('sender', self)
-        self.conn.connect(wait=True)
+        
+        # Connection retry loop
+        retries = 10
+        connected = False
+        while not connected and retries > 0:
+            try:
+                self.conn.connect(wait=True)
+                connected = True
+            except stomp.exception.ConnectFailedException:
+                retries -= 1
+                if retries > 0:
+                    print(f" [!] Connection failed, retrying in 5 seconds... ({retries} retries left)")
+                    time.sleep(5)
+                else:
+                    raise
+        
         self.reply_queue = f'/queue/reply.{uuid.uuid4()}'
         self.conn.subscribe(destination=self.reply_queue, id=1, ack='auto')
         self.response = None
@@ -32,7 +47,7 @@ class ActiveMQSender(stomp.ConnectionListener):
         self.response = None
         self.corr_id = str(uuid.uuid4())
         target = message_data.get('target', 0)
-        destination = f'/queue/test_request_{target}'
+        destination = f'/queue/test_queue_{target}'
         
         self.conn.send(
             destination=destination,
