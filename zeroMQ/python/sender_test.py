@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ZeroMQ Sender with targeted routing support for multi-receiver testing.
-Uses DEALER socket to route messages to specific receivers via a ROUTER.
+ZeroMQ Sender with P2P support for multi-receiver testing.
+Connects directly to each receiver's port (5556 + target) using REQ sockets.
 """
 import zmq
 import json
@@ -15,9 +15,9 @@ from stats_collector import MessageStats, get_current_time_ms
 
 def main():
     ctx = zmq.Context()
-    socket = ctx.socket(zmq.DEALER)
-    socket.setsockopt_string(zmq.IDENTITY, "sender")
-    socket.connect("tcp://localhost:5555")
+    
+    # Cache of sockets per target
+    sockets = {}
 
     data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../test_data.json'))
     with open(data_path, 'r') as f:
@@ -30,29 +30,23 @@ def main():
 
     for item in test_data:
         target = item.get('target', 0)
-        receiver_id = f"receiver_{target}"
+        port = 5556 + target
+        
+        # Get or create socket for this target
+        if target not in sockets:
+            sock = ctx.socket(zmq.REQ)
+            sock.connect(f"tcp://localhost:{port}")
+            sock.setsockopt(zmq.RCVTIMEO, 5000)  # 5s timeout
+            sockets[target] = sock
+        
+        socket = sockets[target]
         msg_start = get_current_time_ms()
         
-        print(f" [x] Sending message {item['message_id']} to target {target}...", end='', flush=True)
+        print(f" [x] Sending message {item['message_id']} to target {target} (port {port})...", end='', flush=True)
         
         try:
-            # Send to specific receiver via ROUTER
-            # ROUTER expects [identity, empty?, data] or just [identity, data]?
-            # DEALER/ROUTER: [identity, data]
-            socket.send_multipart([
-                receiver_id.encode(),
-                json.dumps(item).encode()
-            ])
-            
-            # Wait for response
-            socket.setsockopt(zmq.RCVTIMEO, 5000)
-            # ROUTER receives [identity, data]
-            frames = socket.recv_multipart()
-            if len(frames) >= 2:
-                response = frames[1].decode()
-            else:
-                response = frames[0].decode() # Should not happen with valid Router/Dealer logic
-
+            socket.send_string(json.dumps(item))
+            response = socket.recv_string()
             resp_data = json.loads(response)
             
             if resp_data.get('status') == 'ACK' and resp_data.get('message_id') == item['message_id']:
@@ -86,7 +80,9 @@ def main():
     with open(report_path, 'a') as f:
         f.write(json.dumps(report) + "\n")
 
-    socket.close()
+    # Cleanup
+    for sock in sockets.values():
+        sock.close()
     ctx.term()
 
 if __name__ == "__main__":

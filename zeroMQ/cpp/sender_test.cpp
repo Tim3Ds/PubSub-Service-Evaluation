@@ -3,6 +3,7 @@
 #include <iostream>
 #include <fstream>
 #include <chrono>
+#include <map>
 #include "../../include/json.hpp"
 #include "../../include/stats_collector.hpp"
 
@@ -10,9 +11,9 @@ using json = nlohmann::json;
 
 int main() {
     zmq::context_t context(1);
-    zmq::socket_t socket(context, ZMQ_DEALER);
-    socket.setsockopt(ZMQ_IDENTITY, "sender", 6);
-    socket.connect("tcp://localhost:5555");
+    
+    // Cache of sockets per target
+    std::map<int, zmq::socket_t*> sockets;
 
     std::string data_path = "test_data.json";
     std::ifstream f(data_path);
@@ -47,58 +48,55 @@ int main() {
 
     for (auto& item : test_data) {
         int target = item.value("target", 0);
-        std::string receiver_id = "receiver_" + std::to_string(target);
+        int port = 5556 + target;
 
-        std::cout << " [x] Sending message " << item["message_id"] << " to target " << target << "..." << std::flush;
+        // Get or create socket for this target
+        if (sockets.find(target) == sockets.end()) {
+            zmq::socket_t* sock = new zmq::socket_t(context, ZMQ_REQ);
+            sock->connect("tcp://localhost:" + std::to_string(port));
+            sock->setsockopt(ZMQ_RCVTIMEO, 5000);  // 5s timeout
+            sockets[target] = sock;
+        }
+        
+        zmq::socket_t* socket = sockets[target];
+
+        std::cout << " [x] Sending message " << item["message_id"] << " to target " << target 
+                  << " (port " << port << ")..." << std::flush;
         
         long long msg_start = get_current_time_ms();
         try {
             std::string request_str = item.dump();
             
-            // Send Multipart: [ReceiverID, Data]
-            zmq::message_t id_msg(receiver_id.size());
-            memcpy(id_msg.data(), receiver_id.c_str(), receiver_id.size());
-            socket.send(id_msg, ZMQ_SNDMORE);
-            
             zmq::message_t request(request_str.size());
             memcpy(request.data(), request_str.c_str(), request_str.size());
-            socket.send(request);
+            socket->send(request, zmq::send_flags::none);
 
-            // Receive Multipart: [ReceiverID, Data]
-            zmq::pollitem_t items[] = { { static_cast<void*>(socket), 0, ZMQ_POLLIN, 0 } };
-            zmq::poll(&items[0], 1, 5000); // 5s timeout
+            zmq::message_t reply;
+            auto recv_res = socket->recv(reply);
             
-            if (items[0].revents & ZMQ_POLLIN) {
-                zmq::message_t reply;
-                auto recv_res = socket.recv(reply);
+            if (recv_res.has_value()) {
+                std::string reply_str(static_cast<char*>(reply.data()), reply.size());
                 
-                if (recv_res.has_value()) {
-                     std::string reply_str(static_cast<char*>(reply.data()), reply.size());
-                     
-                     if (reply_str.empty()) {
-                         stats.record_message(false);
-                         std::cout << " [FAILED] Received empty reply" << std::endl;
-                         continue;
-                     }
-
-                     try {
-                         json resp_data = json::parse(reply_str);
-
-                         if (resp_data["status"] == "ACK" && resp_data["message_id"] == item["message_id"]) {
-                             long long msg_duration = get_current_time_ms() - msg_start;
-                             stats.record_message(true, msg_duration);
-                             std::cout << " [OK]" << std::endl;
-                         } else {
-                             stats.record_message(false);
-                             std::cout << " [FAILED] Unexpected response: " << reply_str << std::endl;
-                         }
-                     } catch (const std::exception& e) {
-                         stats.record_message(false);
-                         std::cout << " [FAILED] JSON parse error: " << e.what() << " on data: '" << reply_str << "'" << std::endl;
-                     }
-                } else {
+                if (reply_str.empty()) {
                     stats.record_message(false);
-                    std::cout << " [FAILED] Failed to receive reply" << std::endl;
+                    std::cout << " [FAILED] Received empty reply" << std::endl;
+                    continue;
+                }
+
+                try {
+                    json resp_data = json::parse(reply_str);
+
+                    if (resp_data["status"] == "ACK" && resp_data["message_id"] == item["message_id"]) {
+                        long long msg_duration = get_current_time_ms() - msg_start;
+                        stats.record_message(true, msg_duration);
+                        std::cout << " [OK]" << std::endl;
+                    } else {
+                        stats.record_message(false);
+                        std::cout << " [FAILED] Unexpected response: " << reply_str << std::endl;
+                    }
+                } catch (const std::exception& e) {
+                    stats.record_message(false);
+                    std::cout << " [FAILED] JSON parse error: " << e.what() << " on data: '" << reply_str << "'" << std::endl;
                 }
             } else {
                 stats.record_message(false);
@@ -134,6 +132,12 @@ int main() {
         rf.close();
     } else {
         std::cerr << " [!] Warning: Could not write to report file" << std::endl;
+    }
+
+    // Cleanup
+    for (auto& pair : sockets) {
+        pair.second->close();
+        delete pair.second;
     }
 
     return 0;

@@ -160,24 +160,13 @@ class TestHarness:
             time.sleep(15) # Give it more time to start
             return
         elif self.service == 'zeromq':
-            cmd = ['python3', '-u', str(service_path / 'python' / 'router.py')]
-        elif self.service == 'grpc':
-            # CENTRAL SERVER DISABLED for gRPC P2P tests
-            # The receiver_test.py implementations bind to 50051+, causing a conflict
-            # if we start the central server on 50051 as well.
-            # Since the current tests use direct point-to-point communication (P2P)
-            # or the sender acts as the client to specific receivers, the central
-            # pub/sub server is not needed for the standard test suite.
-            print(f"[Harness] gRPC central server disabled to avoid port conflicts with P2P receivers")
+            # ZeroMQ uses P2P: receivers bind to ports directly, sender connects
+            print(f"[Harness] ZeroMQ uses P2P - no central router needed")
             return
-            
-            # Original code preserved for reference:
-            # server_script = service_path / 'python' / 'server.py'
-            # if server_script.exists():
-            #     cmd = ['python3', '-u', str(server_script)]
-            # else:
-            #     print(f"[Harness] No central gRPC server found at {server_script}, skipping...")
-            #     return
+        elif self.service == 'grpc':
+            # gRPC uses P2P: receivers bind to ports directly, sender connects
+            print(f"[Harness] gRPC uses P2P - no central server needed")
+            return
 
         if cmd:
             log_file = open(f'/tmp/{self.service}_server.log', 'w')

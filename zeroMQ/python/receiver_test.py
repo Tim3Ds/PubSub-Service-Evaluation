@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ZeroMQ Receiver with targeted routing support for multi-receiver testing.
-Uses DEALER socket with assigned identity to receive targeted messages.
+ZeroMQ Receiver with P2P support for multi-receiver testing.
+Uses REP socket bound to port 5556 + receiver_id for direct sender connections.
 Usage: python receiver_test.py --id <0-31>
 """
 import zmq
@@ -13,12 +13,11 @@ import sys
 class ZeroMQReceiver:
     def __init__(self, receiver_id):
         self.receiver_id = receiver_id
-        self.identity = f"receiver_{receiver_id}"
+        self.port = 5556 + receiver_id
         self.messages_received = 0
         self.ctx = zmq.Context()
-        self.socket = self.ctx.socket(zmq.DEALER)
-        self.socket.setsockopt_string(zmq.IDENTITY, self.identity)
-        self.socket.connect("tcp://localhost:5555")
+        self.socket = self.ctx.socket(zmq.REP)
+        self.socket.bind(f"tcp://*:{self.port}")
     
     def handle_signal(self, signum, frame):
         print(f" [x] Receiver {self.receiver_id} shutting down (received {self.messages_received} messages)")
@@ -30,7 +29,7 @@ class ZeroMQReceiver:
         signal.signal(signal.SIGTERM, self.handle_signal)
         signal.signal(signal.SIGINT, self.handle_signal)
         
-        print(f" [*] Receiver {self.receiver_id} ({self.identity}) awaiting ZeroMQ requests")
+        print(f" [*] Receiver {self.receiver_id} bound to port {self.port}, awaiting requests")
 
         while True:
             try:
