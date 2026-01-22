@@ -29,14 +29,12 @@ int main(int argc, char** argv) {
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
 
-    std::string identity = "receiver_" + std::to_string(id);
-
+    int port = 5556 + id;
     zmq::context_t ctx{1};
-    zmq::socket_t socket(ctx, ZMQ_DEALER);
-    socket.setsockopt(ZMQ_IDENTITY, identity.c_str(), identity.size());
-    socket.connect("tcp://localhost:5555");
+    zmq::socket_t socket(ctx, ZMQ_REP);
+    socket.bind("tcp://*:" + std::to_string(port));
 
-    std::cout << " [*] Receiver " << id << " (" << identity << ") awaiting ZeroMQ requests" << std::endl;
+    std::cout << " [*] Receiver " << id << " awaiting ZeroMQ requests on port " << port << std::endl;
 
     while (!should_exit.load()) {
         try {

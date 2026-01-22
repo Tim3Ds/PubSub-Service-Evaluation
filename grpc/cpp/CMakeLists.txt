@@ -2,12 +2,20 @@ cmake_minimum_required(VERSION 3.15)
 project(grpc_pubsub)
 
 set(CMAKE_CXX_STANDARD 17)
+find_package(Threads REQUIRED)
 
 # Set default output directory for executables
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-find_package(Protobuf REQUIRED)
-find_package(gRPC REQUIRED)
+# Find package with local hints
+set(LOCAL_DEPS "${CMAKE_CURRENT_SOURCE_DIR}/build/deps")
+set(CMAKE_PREFIX_PATH ${LOCAL_DEPS} ${CMAKE_PREFIX_PATH})
+
+find_package(Protobuf REQUIRED HINTS ${LOCAL_DEPS})
+find_package(gRPC REQUIRED HINTS ${LOCAL_DEPS})
+
+include_directories(${LOCAL_DEPS}/include)
+include_directories(/home/tim/repos/include)
 
 # Proto file
 set(PROTO_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../proto")
@@ -19,9 +27,9 @@ set(PROTO_SRCS "${PROTO_BINARY_DIR}/pubsub.pb.cc")
 set(PROTO_HDRS "${PROTO_BINARY_DIR}/pubsub.pb.h")
 set(GRPC_SRCS "${PROTO_BINARY_DIR}/pubsub.grpc.pb.cc")
 set(GRPC_HDRS "${PROTO_BINARY_DIR}/pubsub.grpc.pb.h")
-# Force usage of local executables
-set(_PROTOBUF_PROTOC "${CMAKE_PREFIX_PATH}/bin/protoc")
-set(_GRPC_CPP_PLUGIN_EXECUTABLE "${CMAKE_PREFIX_PATH}/bin/grpc_cpp_plugin")
+# Force correct programs
+set(_PROTOBUF_PROTOC "${CMAKE_CURRENT_SOURCE_DIR}/build/deps/bin/protoc")
+set(_GRPC_CPP_PLUGIN_EXECUTABLE "${CMAKE_CURRENT_SOURCE_DIR}/build/deps/bin/grpc_cpp_plugin")
 
 # Rule to generate C++ code from .proto
 add_custom_command(
@@ -71,4 +79,10 @@ target_link_libraries(sender_test test_data_proto gRPC::grpc++ protobuf::libprot
 
 add_executable(receiver_test receiver_test.cpp)
 target_link_libraries(receiver_test test_data_proto gRPC::grpc++ protobuf::libprotobuf)
+
+add_executable(sender_async_test sender_async_test.cpp)
+target_link_libraries(sender_async_test test_data_proto gRPC::grpc++ protobuf::libprotobuf Threads::Threads)
+
+add_executable(receiver_async_test receiver_async_test.cpp)
+target_link_libraries(receiver_async_test test_data_proto gRPC::grpc++ protobuf::libprotobuf Threads::Threads)
 

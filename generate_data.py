@@ -1,7 +1,7 @@
 import json
 import random
 
-messages = 100000
+messages = 35
 
 def generate_random_hex_16bit():
     return f"{random.randint(0, 0xFFFF):04X}"

@@ -4,6 +4,7 @@ project(nats_cpp_examples)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 set(CMAKE_CXX_STANDARD 11)
+find_package(Threads REQUIRED)
 # Download and build nats.c if not found
 include(FetchContent)
 FetchContent_Declare(
@@ -32,4 +33,10 @@ target_link_libraries(sender_test PRIVATE nats_static)
 
 add_executable(receiver_test receiver_test.cpp)
 target_link_libraries(receiver_test PRIVATE nats_static)
+
+add_executable(sender_async_test sender_async_test.cpp)
+target_link_libraries(sender_async_test PRIVATE nats_static Threads::Threads)
+
+add_executable(receiver_async_test receiver_async_test.cpp)
+target_link_libraries(receiver_async_test PRIVATE nats_static Threads::Threads)
 

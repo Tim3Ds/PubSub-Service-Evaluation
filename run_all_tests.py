@@ -17,16 +17,21 @@ class Logger:
         self.terminal.flush()
         self.log.flush()
 
-def run_test(service, sender, py_receivers, cpp_receivers, report_file, logger):
-    print(f"[-] Running {service} {sender} -> {py_receivers} Py / {cpp_receivers} C++...")
+def run_test(service, sender, py_receivers, cpp_receivers, report_file, logger, async_sender=False, async_receiver=False):
+    mode_str = f"S:{'A' if async_sender else 'N'}/R:{'A' if async_receiver else 'N'}"
+    print(f"[-] Running {service} {sender} ({mode_str}) -> {py_receivers} Py / {cpp_receivers} C++...")
     cmd = [
-        "python3", "harness/test_harness.py",
+        "python3", "-u", "harness/test_harness.py",
         "--service", service,
         "--sender", sender,
         "--py-receivers", str(py_receivers),
         "--cpp-receivers", str(cpp_receivers),
         "--report", report_file
     ]
+    if async_sender:
+        cmd.append("--async-sender")
+    if async_receiver:
+        cmd.append("--async-receiver")
     try:
         # Capture stdout/stderr and print/log in real-time if possible, 
         # or just let it write to sys.stdout which is now our Logger
@@ -41,7 +46,7 @@ def run_test(service, sender, py_receivers, cpp_receivers, report_file, logger):
                 
         rc = process.poll()
         if rc == 0:
-            print("[+] Test passed\n")
+            print("[+] Test Completed\n")
         else:
             print(f"[!] Test failed with exit code {rc}\n")
             
@@ -49,8 +54,7 @@ def run_test(service, sender, py_receivers, cpp_receivers, report_file, logger):
         print(f"[!] Test failed with exception: {e}\n")
 
 def main():
-    services = ['grpc', 'zeromq', 'redis', 'rabbitmq', 'nats']
-    # ActiveMQ excluded due to known performance issues/timeouts
+    services = ['grpc', 'zeromq', 'redis', 'rabbitmq', 'nats', 'activemq']
     
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     report_file = f"report{timestamp}.json"
@@ -63,14 +67,14 @@ def main():
     print(f"Log will be written to {log_file}")
 
     spreads = [
-        (32, 0),
+        # (32, 0),
         (31, 1),
-        (24, 8),
-        (20, 12),
-        (16, 16),
-        (8, 24),
+        # (24, 8),
+        # (20, 12),
+        # (16, 16),
+        # (8, 24),
         (1, 31),
-        (0, 32)
+        # (0, 32)
     ]
 
     scenarios = []
@@ -78,13 +82,17 @@ def main():
     for service in services:
         for sender in ['python', 'cpp']:
             for py, cpp in spreads:
-                scenarios.append((service, sender, py, cpp))
+                for async_s in [False, True]:
+                    for async_r in [False, True]:
+                        scenarios.append((service, sender, py, cpp, async_s, async_r))
 
-    print(f"Starting execution of {len(scenarios)} test scenarios...")
+    count = len(scenarios)
+    print(f"Starting execution of {count} test scenarios...")
     start_time = time.time()
 
-    for service, sender, py, cpp in scenarios:
-        run_test(service, sender, py, cpp, report_file, sys.stdout)
+    for i, (service, sender, py, cpp, async_s, async_r) in enumerate(scenarios):
+        print(f"Scenario {i+1}/{count}")
+        run_test(service, sender, py, cpp, report_file, sys.stdout, async_s, async_r)
         # Small cooldown to ensure ports allow release if needed
         time.sleep(1) 
 

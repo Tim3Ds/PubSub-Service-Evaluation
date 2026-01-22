@@ -27,4 +27,10 @@ target_link_libraries(sender_test ${ACTIVEMQCPP_LIBRARIES} uuid stdc++ pthread)
 add_executable(receiver_test receiver_test.cpp)
 target_link_libraries(receiver_test ${ACTIVEMQCPP_LIBRARIES} uuid stdc++ pthread)
 
+add_executable(sender_async_test sender_async_test.cpp)
+target_link_libraries(sender_async_test ${ACTIVEMQCPP_LIBRARIES} uuid stdc++ pthread)
+
+add_executable(receiver_async_test receiver_async_test.cpp)
+target_link_libraries(receiver_async_test ${ACTIVEMQCPP_LIBRARIES} uuid stdc++ pthread)
+
 

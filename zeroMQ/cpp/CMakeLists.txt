@@ -4,6 +4,7 @@ project(zeromq_examples)
 find_package(PkgConfig REQUIRED)
 
 set(CMAKE_CXX_STANDARD 11)
+find_package(Threads REQUIRED)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # Add local build/lib/pkgconfig to PKG_CONFIG_PATH for local ActiveMQ-CPP
@@ -20,3 +21,11 @@ target_include_directories(sender_test PUBLIC ${ZMQ_INCLUDE_DIRS})
 add_executable(receiver_test receiver_test.cpp)
 target_link_libraries(receiver_test PUBLIC ${ZMQ_LIBRARIES})
 target_include_directories(receiver_test PUBLIC ${ZMQ_INCLUDE_DIRS})
+
+add_executable(sender_async_test sender_async_test.cpp)
+target_link_libraries(sender_async_test PUBLIC ${ZMQ_LIBRARIES} Threads::Threads)
+target_include_directories(sender_async_test PUBLIC ${ZMQ_INCLUDE_DIRS})
+
+add_executable(receiver_async_test receiver_async_test.cpp)
+target_link_libraries(receiver_async_test PUBLIC ${ZMQ_LIBRARIES} Threads::Threads)
+target_include_directories(receiver_async_test PUBLIC ${ZMQ_INCLUDE_DIRS})

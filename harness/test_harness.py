@@ -14,11 +14,13 @@ import signal
 from pathlib import Path
 
 class TestHarness:
-    def __init__(self, service: str, sender_lang: str, py_receivers: int, cpp_receivers: int):
+    def __init__(self, service: str, sender_lang: str, py_receivers: int, cpp_receivers: int, async_sender: bool = False, async_receiver: bool = False):
         self.service = service
         self.sender_lang = sender_lang
         self.py_receivers = py_receivers
         self.cpp_receivers = cpp_receivers
+        self.async_sender = async_sender
+        self.async_receiver = async_receiver
         self.total_receivers = py_receivers + cpp_receivers
         self.receiver_procs = []
         self.sender_proc = None
@@ -34,6 +36,16 @@ class TestHarness:
             'activemq': 'activeMQ'
         }
         
+        # Consistent display names for reporting
+        self.service_display_names = {
+            'redis': 'Redis',
+            'rabbitmq': 'RabbitMQ',
+            'zeromq': 'ZeroMQ',
+            'nats': 'NATS',
+            'grpc': 'gRPC',
+            'activemq': 'ActiveMQ'
+        }
+        
     def get_service_path(self) -> Path:
         return self.base_dir / self.service_dirs[self.service]
     
@@ -43,10 +55,12 @@ class TestHarness:
         if self.service == 'activemq':
             prefix = 'python-client' if lang == 'python' else 'cpp-client'
         
+        script_name = 'receiver_async_test' if self.async_receiver else 'receiver_test'
+        
         if lang == 'python':
-            return ['python3', str(service_path / prefix / 'receiver_test.py'), '--id', str(receiver_id)]
+            return ['python3', str(service_path / prefix / f'{script_name}.py'), '--id', str(receiver_id)]
         else:  # cpp
-            return [str(service_path / prefix / 'build' / 'bin' / 'receiver_test'), '--id', str(receiver_id)]
+            return [str(service_path / prefix / 'build' / 'bin' / script_name), '--id', str(receiver_id)]
     
     def get_sender_cmd(self) -> list:
         service_path = self.get_service_path()
@@ -54,13 +68,16 @@ class TestHarness:
         if self.service == 'activemq':
             prefix = 'python-client' if self.sender_lang == 'python' else 'cpp-client'
             
+        script_name = 'sender_async_test' if self.async_sender else 'sender_test'
+            
         if self.sender_lang == 'python':
-            return ['python3', str(service_path / prefix / 'sender_test.py')]
+            return ['python3', str(service_path / prefix / f'{script_name}.py')]
         else:  # cpp
-            return [str(service_path / prefix / 'build' / 'bin' / 'sender_test')]
+            return [str(service_path / prefix / 'build' / 'bin' / script_name)]
     
     def spawn_receivers(self):
-        print(f"[Harness] Spawning {self.total_receivers} receivers ({self.py_receivers} Python, {self.cpp_receivers} C++)...")
+        mode_str = "ASYNC" if self.async_receiver else "SYNC"
+        print(f"[Harness] Spawning {self.total_receivers} {mode_str} receivers ({self.py_receivers} Python, {self.cpp_receivers} C++)...", flush=True)
         
         receiver_id = 0
         
@@ -70,7 +87,7 @@ class TestHarness:
             log_file = open(f'/tmp/receiver_{receiver_id}.log', 'w')
             proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
             self.receiver_procs.append((proc, log_file, receiver_id, 'python'))
-            print(f"  [+] Receiver {receiver_id} (Python) started, PID={proc.pid}")
+            print(f"  [+] Receiver {receiver_id} (Python) started, PID={proc.pid}", flush=True)
             receiver_id += 1
         
         # Spawn C++ receivers
@@ -79,23 +96,31 @@ class TestHarness:
             log_file = open(f'/tmp/receiver_{receiver_id}.log', 'w')
             proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
             self.receiver_procs.append((proc, log_file, receiver_id, 'cpp'))
-            print(f"  [+] Receiver {receiver_id} (C++) started, PID={proc.pid}")
+            print(f"  [+] Receiver {receiver_id} (C++) started, PID={proc.pid}", flush=True)
             receiver_id += 1
         
         # Give receivers time to start
         time.sleep(2)
     
     def run_sender(self):
-        print(f"[Harness] Starting sender ({self.sender_lang})...")
+        mode_str = "ASYNC" if self.async_sender else "SYNC"
+        print(f"[Harness] Starting {mode_str} sender ({self.sender_lang})...", flush=True)
         cmd = self.get_sender_cmd()
         self.sender_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         
         # Stream sender output
         for line in self.sender_proc.stdout:
-            print(f"  [Sender] {line.rstrip()}")
+            print(f"  [Sender] {line.rstrip()}", flush=True)
+            
+            # Periodically check if receivers are still alive
+            for proc, log_file, receiver_id, lang in self.receiver_procs:
+                if proc.poll() is not None:
+                    print(f"  [!] Receiver {receiver_id} ({lang}) CRASHED with exit code {proc.returncode}. Check /tmp/receiver_{receiver_id}.log", flush=True)
+                    self.sender_proc.terminate()
+                    return
         
         self.sender_proc.wait()
-        print(f"[Harness] Sender finished with exit code {self.sender_proc.returncode}")
+        print(f"[Harness] Sender finished with exit code {self.sender_proc.returncode}", flush=True)
     
     def stop_receivers(self):
         print("[Harness] Stopping receivers...")
@@ -111,7 +136,7 @@ class TestHarness:
     def aggregate_results(self) -> dict:
         print("[Harness] Aggregating results...")
         results = {
-            'service': self.service,
+            'service': self.service_display_names.get(self.service, self.service),
             'sender_lang': self.sender_lang,
             'py_receivers': self.py_receivers,
             'cpp_receivers': self.cpp_receivers,
@@ -132,7 +157,7 @@ class TestHarness:
         return results
     
     def start_server(self):
-        print(f"[Harness] Starting server/broker/router for {self.service}...")
+        print(f"[Harness] Starting service backend for {self.service}...", flush=True)
         service_path = self.get_service_path()
         
         self.server_proc = None
@@ -161,11 +186,11 @@ class TestHarness:
             return
         elif self.service == 'zeromq':
             # ZeroMQ uses P2P: receivers bind to ports directly, sender connects
-            print(f"[Harness] ZeroMQ uses P2P - no central router needed")
+            print(f"[Harness] ZeroMQ uses P2P - no central backend needed")
             return
         elif self.service == 'grpc':
             # gRPC uses P2P: receivers bind to ports directly, sender connects
-            print(f"[Harness] gRPC uses P2P - no central server needed")
+            print(f"[Harness] gRPC uses P2P - no central backend needed")
             return
 
         if cmd:
@@ -175,7 +200,7 @@ class TestHarness:
             time.sleep(3) # Wait for startup
 
     def stop_server(self):
-        print(f"[Harness] Stopping server/broker/router for {self.service}...")
+        print(f"[Harness] Stopping backend for {self.service}...")
         if self.service == 'activemq':
             service_path = self.get_service_path()
             cmd = [str(service_path / 'apache-activemq-6.2.0' / 'bin' / 'activemq'), 'stop']
@@ -218,6 +243,8 @@ def main():
     parser.add_argument('--sender', required=True, choices=['python', 'cpp'])
     parser.add_argument('--py-receivers', type=int, default=16)
     parser.add_argument('--cpp-receivers', type=int, default=16)
+    parser.add_argument('--async-sender', action='store_true', help='Use asynchronous sender')
+    parser.add_argument('--async-receiver', action='store_true', help='Use asynchronous receiver')
     parser.add_argument('--report', help='File to append results to')
     
     args = parser.parse_args()
@@ -233,7 +260,9 @@ def main():
         service=args.service,
         sender_lang=args.sender,
         py_receivers=args.py_receivers,
-        cpp_receivers=args.cpp_receivers
+        cpp_receivers=args.cpp_receivers,
+        async_sender=args.async_sender,
+        async_receiver=args.async_receiver
     )
     
     results = harness.run()
@@ -251,7 +280,12 @@ def main():
             print(f"[Harness] Warning: Could not read sender results from {report_path}: {e}")
 
     # Merge results
-    final_results = {**results, **sender_results}
+    final_results = {
+        **results, 
+        **sender_results,
+        'async_sender': args.async_sender,
+        'async_receiver': args.async_receiver
+    }
 
     if args.report:
         with open(args.report, 'a') as f:
