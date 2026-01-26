@@ -22,13 +22,19 @@ void onMsg(natsConnection *nc, natsSubscription *sub, natsMsg *msg, void *closur
     try {
         std::string request_str(natsMsg_GetData(msg), natsMsg_GetDataLength(msg));
         json data = json::parse(request_str);
-        std::string message_id = data.value("message_id", "unknown");
+        // Handle message_id that could be either string or numeric
+        std::string message_id;
+        if (data["message_id"].is_string()) {
+            message_id = data["message_id"].get<std::string>();
+        } else {
+            message_id = std::to_string(data["message_id"].get<int>());
+        }
 
         std::cout << " [ASYNC] Received message " << message_id << std::endl;
 
         json resp;
         resp["status"] = "ACK";
-        resp["message_id"] = message_id;
+        resp["message_id"] = data["message_id"];  // Keep original type
         resp["async"] = true;
 
         std::string resp_str = resp.dump();

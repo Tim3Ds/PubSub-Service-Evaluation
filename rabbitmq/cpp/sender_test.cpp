@@ -48,7 +48,8 @@ int main() {
     std::cout << " [x] Starting transfer of " << test_data.size() << " messages..." << std::endl;
 
     for (auto& item : test_data) {
-        std::cout << " [x] Sending message " << item["message_id"] << " (" << item["message_name"] << ")..." << std::flush;
+        std::string message_id = item["message_id"].is_string() ? item["message_id"].get<std::string>() : std::to_string(item["message_id"].get<long long>());
+        std::cout << " [x] Sending message " << message_id << " (" << item["message_name"] << ")..." << std::flush;
         
         long long msg_start = get_current_time_ms();
         std::string body = item.dump();
@@ -68,7 +69,10 @@ int main() {
 
         amqp_envelope_t envelope;
         amqp_maybe_release_buffers(conn);
-        amqp_rpc_reply_t res = amqp_consume_message(conn, &envelope, NULL, 0);
+        struct timeval timeout;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 40000;
+        amqp_rpc_reply_t res = amqp_consume_message(conn, &envelope, &timeout, 0);
 
         if (res.reply_type == AMQP_RESPONSE_NORMAL) {
             try {

@@ -34,7 +34,7 @@ async def main():
         
         print(f" [x] Sending message {item['message_id']} to target {target}...", end='', flush=True)
         try:
-            response = await nc.request(subject, json.dumps(item).encode(), timeout=5)
+            response = await nc.request(subject, json.dumps(item).encode(), timeout=0.2)
             resp_data = json.loads(response.data.decode())
             
             if resp_data.get('status') == 'ACK' and resp_data.get('message_id') == item['message_id']:

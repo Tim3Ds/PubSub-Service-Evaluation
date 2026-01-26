@@ -57,13 +57,19 @@ int main(int argc, char* argv[]) {
             std::string body((char *)envelope.message.body.bytes, envelope.message.body.len);
             try {
                 json data = json::parse(body);
-                std::string message_id = data.value("message_id", "unknown");
+                // Handle message_id that could be either string or numeric
+                std::string message_id;
+                if (data["message_id"].is_string()) {
+                    message_id = data["message_id"].get<std::string>();
+                } else {
+                    message_id = std::to_string(data["message_id"].get<int>());
+                }
 
                 std::cout << " [Receiver " << receiver_id << "] [ASYNC] Received message " << message_id << std::endl;
 
                 json resp;
                 resp["status"] = "ACK";
-                resp["message_id"] = message_id;
+                resp["message_id"] = data["message_id"];  // Keep original type
                 resp["receiver_id"] = receiver_id;
                 resp["async"] = true;
 

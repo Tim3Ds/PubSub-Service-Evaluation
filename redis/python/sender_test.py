@@ -28,7 +28,7 @@ class RedisSender:
         self.r.rpush(queue_name, json.dumps(message_data))
         
         # BLPOP with timeout for the response
-        response = self.r.blpop(self.callback_queue, timeout=5)
+        response = self.r.blpop(self.callback_queue, timeout=0.2)
         if response:
             return response[1]
         return None

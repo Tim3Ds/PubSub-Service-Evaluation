@@ -57,7 +57,7 @@ class RabbitMQAsyncSender:
         )
         
         try:
-            return await asyncio.wait_for(future, timeout=5.0)
+            return await asyncio.wait_for(future, timeout=0.2)
         except asyncio.TimeoutError:
             return None
         finally:

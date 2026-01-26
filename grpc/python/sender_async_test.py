@@ -28,7 +28,7 @@ async def send_message(stubs, item, stats):
             message_value=item['message_value'],
             target=target
         )
-        response = await stubs[target].TransferData(request, timeout=5)
+        response = await stubs[target].TransferData(request, timeout=0.04)
         
         if response.status == 'ACK' and response.message_id == message_id:
             msg_duration = get_current_time_ms() - msg_start

@@ -28,7 +28,7 @@ class RedisAsyncSender:
         
         # BLPOP with timeout for the response
         try:
-            response = await self.r.blpop(callback_queue, timeout=5)
+            response = await self.r.blpop(callback_queue, timeout=0.2)
             if response:
                 return response[1]
         except Exception as e:

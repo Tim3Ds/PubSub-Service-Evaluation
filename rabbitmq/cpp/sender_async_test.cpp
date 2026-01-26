@@ -20,7 +20,7 @@ struct TaskResult {
 
 TaskResult send_message_task(json item) {
     TaskResult res;
-    res.message_id = item["message_id"];
+    res.message_id = item["message_id"].is_string() ? item["message_id"].get<std::string>() : std::to_string(item["message_id"].get<long long>());
     res.success = false;
     res.duration = 0;
 
@@ -57,8 +57,8 @@ TaskResult send_message_task(json item) {
 
     amqp_envelope_t envelope;
     struct timeval timeout;
-    timeout.tv_sec = 5;
-    timeout.tv_usec = 0;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 40000;
     
     amqp_rpc_reply_t r = amqp_consume_message(conn, &envelope, &timeout, 0);
 
@@ -66,7 +66,10 @@ TaskResult send_message_task(json item) {
         try {
             std::string reply_str((char *)envelope.message.body.bytes, envelope.message.body.len);
             json resp_data = json::parse(reply_str);
-            if (resp_data["status"] == "ACK" && resp_data["message_id"] == res.message_id) {
+            // Handle message_id that could be either string or numeric
+            auto resp_msg_id = resp_data["message_id"].is_string() ? resp_data["message_id"].get<std::string>() : std::to_string(resp_data["message_id"].get<long long>());
+            
+            if (resp_data["status"] == "ACK" && resp_msg_id == res.message_id) {
                 res.duration = get_current_time_ms() - msg_start;
                 res.success = true;
             } else {

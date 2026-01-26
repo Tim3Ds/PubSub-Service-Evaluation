@@ -59,7 +59,7 @@ class ActiveMQSender(stomp.ConnectionListener):
         )
         
         start_wait = time.time()
-        while self.response is None and (time.time() - start_wait) < 5:
+        while self.response is None and (time.time() - start_wait) < 0.04:
             time.sleep(0.01)
         return self.response
 

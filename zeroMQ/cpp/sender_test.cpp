@@ -54,13 +54,14 @@ int main() {
         if (sockets.find(target) == sockets.end()) {
             zmq::socket_t* sock = new zmq::socket_t(context, ZMQ_REQ);
             sock->connect("tcp://localhost:" + std::to_string(port));
-            sock->setsockopt(ZMQ_RCVTIMEO, 5000);  // 5s timeout
+            sock->setsockopt(ZMQ_RCVTIMEO, 500);  // 500ms timeout (async receiver responsiveness)
             sockets[target] = sock;
         }
         
         zmq::socket_t* socket = sockets[target];
+        std::string message_id = item["message_id"].is_string() ? item["message_id"].get<std::string>() : std::to_string(item["message_id"].get<long long>());
 
-        std::cout << " [x] Sending message " << item["message_id"] << " to target " << target 
+        std::cout << " [x] Sending message " << message_id << " to target " << target 
                   << " (port " << port << ")..." << std::flush;
         
         long long msg_start = get_current_time_ms();
@@ -85,8 +86,9 @@ int main() {
 
                 try {
                     json resp_data = json::parse(reply_str);
+                    auto resp_msg_id = resp_data["message_id"].is_string() ? resp_data["message_id"].get<std::string>() : std::to_string(resp_data["message_id"].get<long long>());
 
-                    if (resp_data["status"] == "ACK" && resp_data["message_id"] == item["message_id"]) {
+                    if (resp_data["status"] == "ACK" && resp_msg_id == message_id) {
                         long long msg_duration = get_current_time_ms() - msg_start;
                         stats.record_message(true, msg_duration);
                         std::cout << " [OK]" << std::endl;

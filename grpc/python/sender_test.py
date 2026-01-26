@@ -43,7 +43,7 @@ def main():
                 message_value=item['message_value'],
                 target=target
             )
-            response = stubs[target].TransferData(request, timeout=5)
+            response = stubs[target].TransferData(request, timeout=0.04)
             
             if response.status == 'ACK' and response.message_id == item['message_id']:
                 msg_duration = get_current_time_ms() - msg_start

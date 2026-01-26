@@ -36,7 +36,7 @@ def main():
         if target not in sockets:
             sock = ctx.socket(zmq.REQ)
             sock.connect(f"tcp://localhost:{port}")
-            sock.setsockopt(zmq.RCVTIMEO, 5000)  # 5s timeout
+            sock.setsockopt(zmq.RCVTIMEO, 500)  # 500ms timeout (async C++ receiver responsiveness)
             sockets[target] = sock
         
         socket = sockets[target]

@@ -23,10 +23,10 @@ std::string generate_uuid() {
     return "cpp-redis-async-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "-" + std::to_string(++counter);
 }
 
-TaskResult send_message_task(json item, const std::string& callback_queue) {
+TaskResult send_message_task(json item) {
     int target = item.value("target", 0);
     std::string queue_name = "test_queue_" + std::to_string(target);
-    std::string message_id = item["message_id"];
+    std::string message_id = item["message_id"].is_string() ? item["message_id"].get<std::string>() : std::to_string(item["message_id"].get<long long>());
     
     TaskResult res;
     res.message_id = message_id;
@@ -42,18 +42,22 @@ TaskResult send_message_task(json item, const std::string& callback_queue) {
 
     try {
         long long msg_start = get_current_time_ms();
+        std::string callback_queue = "callback_" + generate_uuid();
         item["reply_to"] = callback_queue;
         std::string body = item.dump();
 
         redisReply *push_reply = (redisReply *)redisCommand(c, "RPUSH %s %b", queue_name.c_str(), body.c_str(), (size_t)body.size());
         freeReplyObject(push_reply);
 
-        redisReply *pop_reply = (redisReply *)redisCommand(c, "BLPOP %s 5", callback_queue.c_str());
+        redisReply *pop_reply = (redisReply *)redisCommand(c, "BLPOP %s 0.04", callback_queue.c_str());
         
         if (pop_reply && pop_reply->type == REDIS_REPLY_ARRAY && pop_reply->elements == 2) {
             std::string reply_str = pop_reply->element[1]->str;
             json resp_data = json::parse(reply_str);
-            if (resp_data["status"] == "ACK" && resp_data["message_id"] == message_id) {
+            // Handle message_id that could be either string or numeric
+            auto resp_msg_id = resp_data["message_id"].is_string() ? resp_data["message_id"].get<std::string>() : std::to_string(resp_data["message_id"].get<long long>());
+            
+            if (resp_data["status"] == "ACK" && resp_msg_id == message_id) {
                 res.duration = get_current_time_ms() - msg_start;
                 res.success = true;
             } else {
@@ -82,7 +86,7 @@ int main() {
     }
     json test_data = json::parse(f);
 
-    std::string callback_queue = "callback_" + generate_uuid();
+    // std::string callback_queue = "callback_" + generate_uuid(); // Removed shared queue
 
     std::cout << " [x] Starting Redis ASYNC Sender (C++)" << std::endl;
     std::cout << " [x] Starting async transfer of " << test_data.size() << " messages..." << std::endl;
@@ -92,7 +96,7 @@ int main() {
 
     std::vector<std::future<TaskResult>> futures;
     for (auto& item : test_data) {
-        futures.push_back(std::async(std::launch::async, send_message_task, item, callback_queue));
+        futures.push_back(std::async(std::launch::async, send_message_task, item));
     }
 
     for (auto& fut : futures) {

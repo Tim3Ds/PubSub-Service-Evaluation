@@ -64,7 +64,7 @@ public:
 
 TaskResult send_message_task(ConnectionFactory* factory, json item) {
     TaskResult res;
-    res.message_id = item["message_id"];
+    res.message_id = item["message_id"].is_string() ? item["message_id"].get<std::string>() : std::to_string(item["message_id"].get<long long>());
     res.success = false;
     res.duration = 0;
 
@@ -99,7 +99,10 @@ TaskResult send_message_task(ConnectionFactory* factory, json item) {
 
         if (listener.latch.await(5000)) {
             json resp_data = json::parse(listener.response);
-            if (resp_data["status"] == "ACK" && resp_data["message_id"] == res.message_id) {
+            // Handle message_id that could be either string or numeric
+            auto resp_msg_id = resp_data["message_id"].is_string() ? resp_data["message_id"].get<std::string>() : std::to_string(resp_data["message_id"].get<long long>());
+            
+            if (resp_data["status"] == "ACK" && resp_msg_id == res.message_id) {
                 res.duration = get_current_time_ms() - msg_start;
                 res.success = true;
             } else {

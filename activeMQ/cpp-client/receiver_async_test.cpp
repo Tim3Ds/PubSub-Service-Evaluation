@@ -46,7 +46,13 @@ public:
             try {
                 string body = textMessage->getText();
                 json data = json::parse(body);
-                string message_id = data.value("message_id", "unknown");
+                // Handle message_id that could be either string or numeric
+                string message_id;
+                if (data["message_id"].is_string()) {
+                    message_id = data["message_id"].get<std::string>();
+                } else {
+                    message_id = std::to_string(data["message_id"].get<int>());
+                }
 
                 cout << " [Receiver " << receiver_id << "] [ASYNC] Received message " << message_id << endl;
 
@@ -54,7 +60,7 @@ public:
                 if (replyTo != NULL) {
                     json resp;
                     resp["status"] = "ACK";
-                    resp["message_id"] = message_id;
+                    resp["message_id"] = data["message_id"];  // Keep original type
                     resp["receiver_id"] = receiver_id;
                     resp["async"] = true;
 

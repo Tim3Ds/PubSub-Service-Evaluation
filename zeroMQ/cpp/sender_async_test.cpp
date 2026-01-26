@@ -24,7 +24,7 @@ std::mutex stats_mutex;
 TaskResult send_message_task(zmq::context_t& context, json item) {
     int target = item.value("target", 0);
     int port = 5556 + target;
-    std::string message_id = item["message_id"];
+    std::string message_id = item["message_id"].is_string() ? item["message_id"].get<std::string>() : std::to_string(item["message_id"].get<long long>());
     
     TaskResult res;
     res.message_id = message_id;
@@ -34,7 +34,7 @@ TaskResult send_message_task(zmq::context_t& context, json item) {
     try {
         zmq::socket_t socket(context, ZMQ_REQ);
         socket.connect("tcp://localhost:" + std::to_string(port));
-        socket.setsockopt(ZMQ_RCVTIMEO, 5000);  // 5s timeout
+        socket.setsockopt(ZMQ_RCVTIMEO, 500);  // 500ms timeout (async receiver responsiveness)
 
         long long msg_start = get_current_time_ms();
         std::string request_str = item.dump();
@@ -50,7 +50,10 @@ TaskResult send_message_task(zmq::context_t& context, json item) {
             std::string reply_str(static_cast<char*>(reply.data()), reply.size());
             if (!reply_str.empty()) {
                 json resp_data = json::parse(reply_str);
-                if (resp_data["status"] == "ACK" && resp_data["message_id"] == message_id) {
+                // Handle message_id that could be either string or numeric
+                auto resp_msg_id = resp_data["message_id"].is_string() ? resp_data["message_id"].get<std::string>() : std::to_string(resp_data["message_id"].get<long long>());
+                
+                if (resp_data["status"] == "ACK" && resp_msg_id == message_id) {
                     res.duration = get_current_time_ms() - msg_start;
                     res.success = true;
                 } else {

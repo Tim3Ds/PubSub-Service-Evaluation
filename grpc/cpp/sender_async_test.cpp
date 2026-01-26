@@ -34,7 +34,7 @@ public:
     TaskResult TransferData(const TestDataItem& item) {
         Ack ack;
         ClientContext context;
-        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(40));
 
         long long msg_start = get_current_time_ms();
         Status status = stub_->TransferData(&context, item, &ack);

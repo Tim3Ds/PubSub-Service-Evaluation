@@ -48,8 +48,9 @@ int main() {
     for (auto& item : test_data) {
         int target = item.value("target", 0);
         std::string queue_name = "test_queue_" + std::to_string(target);
+        std::string message_id = item["message_id"].is_string() ? item["message_id"].get<std::string>() : std::to_string(item["message_id"].get<long long>());
         
-        std::cout << " [x] Sending message " << item["message_id"] << " to target " << target << "..." << std::flush;
+        std::cout << " [x] Sending message " << message_id << " to target " << target << "..." << std::flush;
         
         long long msg_start = get_current_time_ms();
         item["reply_to"] = callback_queue;
@@ -58,26 +59,27 @@ int main() {
         redisReply *push_reply = (redisReply *)redisCommand(c, "RPUSH %s %b", queue_name.c_str(), body.c_str(), (size_t)body.size());
         freeReplyObject(push_reply);
 
-        redisReply *pop_reply = (redisReply *)redisCommand(c, "BLPOP %s 5", callback_queue.c_str());
-        
-        if (pop_reply && pop_reply->type == REDIS_REPLY_ARRAY && pop_reply->elements == 2) {
-            std::string reply_str = pop_reply->element[1]->str;
-            try {
-                json resp_data = json::parse(reply_str);
+        redisReply *pop_reply = (redisReply *)redisCommand(c, "BLPOP %s 0.04", callback_queue.c_str());
+
+            if (pop_reply && pop_reply->type == REDIS_REPLY_ARRAY && pop_reply->elements == 2) {
+                std::string reply_str = pop_reply->element[1]->str;
+                try {
+                    json resp_data = json::parse(reply_str);
                 
-                if (resp_data["status"] == "ACK" && resp_data["message_id"] == item["message_id"]) {
-                    long long msg_duration = get_current_time_ms() - msg_start;
-                    stats.record_message(true, msg_duration);
-                    std::cout << " [OK]" << std::endl;
+                    auto resp_msg_id = resp_data["message_id"].is_string() ? resp_data["message_id"].get<std::string>() : std::to_string(resp_data["message_id"].get<long long>());
+                    if (resp_data["status"] == "ACK" && resp_msg_id == message_id) {
+                        long long msg_duration = get_current_time_ms() - msg_start;
+                        stats.record_message(true, msg_duration);
+                        std::cout << " [OK]" << std::endl;
                 } else {
                     stats.record_message(false);
                     std::cout << " [FAILED] Unexpected response" << std::endl;
-                }
-            } catch (...) {
+                    }
+                } catch (...) {
                 stats.record_message(false);
                 std::cout << " [FAILED] Parse error" << std::endl;
-            }
-        } else {
+                }
+            } else {
             stats.record_message(false);
             std::cout << " [FAILED] Timeout" << std::endl;
         }

@@ -21,7 +21,7 @@ struct TaskResult {
 TaskResult send_message_task(natsConnection *conn, json item) {
     int target = item.value("target", 0);
     std::string subject = "test.receiver." + std::to_string(target);
-    std::string message_id = item["message_id"];
+    std::string message_id = item["message_id"].is_string() ? item["message_id"].get<std::string>() : std::to_string(item["message_id"].get<long long>());
     
     TaskResult res;
     res.message_id = message_id;
@@ -32,14 +32,16 @@ TaskResult send_message_task(natsConnection *conn, json item) {
     natsMsg *reply = NULL;
     long long msg_start = get_current_time_ms();
     
-    natsStatus s = natsConnection_Request(&reply, conn, subject.c_str(), body.c_str(), (int)body.size(), 5000);
+    natsStatus s = natsConnection_Request(&reply, conn, subject.c_str(), body.c_str(), (int)body.size(), 40);
     
     if (s == NATS_OK) {
         try {
             std::string reply_str(natsMsg_GetData(reply), natsMsg_GetDataLength(reply));
             json resp_data = json::parse(reply_str);
+            // Handle message_id that could be either string or numeric
+            auto resp_msg_id = resp_data["message_id"].is_string() ? resp_data["message_id"].get<std::string>() : std::to_string(resp_data["message_id"].get<long long>());
             
-            if (resp_data["status"] == "ACK" && resp_data["message_id"] == message_id) {
+            if (resp_data["status"] == "ACK" && resp_msg_id == message_id) {
                 res.duration = get_current_time_ms() - msg_start;
                 res.success = true;
             } else {

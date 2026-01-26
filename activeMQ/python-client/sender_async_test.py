@@ -61,7 +61,7 @@ class ActiveMQAsyncSender(stomp.ConnectionListener):
             }
         )
         
-        if event.wait(timeout=5):
+        if event.wait(timeout=0.04):
             res = self.futures[corr_id]['response']
             del self.futures[corr_id]
             return res

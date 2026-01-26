@@ -50,7 +50,7 @@ public:
 
         Ack reply;
         ClientContext context;
-        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(40));
 
         Status status = stubs_[target]->TransferData(&context, request, &reply);
 

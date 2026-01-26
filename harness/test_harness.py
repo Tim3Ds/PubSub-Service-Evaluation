@@ -292,9 +292,6 @@ def main():
             f.write(json.dumps(final_results) + '\n')
         print(f"[Harness] Results appended to {args.report}")
 
-    print("\n[Harness] Results:")
-    print(json.dumps(final_results, indent=2))
-
 
 if __name__ == '__main__':
     main()

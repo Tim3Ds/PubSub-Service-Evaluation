@@ -54,7 +54,7 @@ class RabbitMQSender:
             body=json.dumps(message_data))
         
         start_wait = time.time()
-        while self.response is None and (time.time() - start_wait) < 5:
+        while self.response is None and (time.time() - start_wait) < 0.2:
             self.connection.process_data_events()
         return self.response
 

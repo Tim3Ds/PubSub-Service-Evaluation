@@ -41,7 +41,8 @@ int main() {
     std::cout << " [x] Starting transfer of " << test_data.size() << " messages..." << std::endl;
 
     for (auto& item : test_data) {
-        std::cout << " [x] Sending message " << item["message_id"] << " (" << item["message_name"] << ")..." << std::flush;
+        std::string message_id = item["message_id"].is_string() ? item["message_id"].get<std::string>() : std::to_string(item["message_id"].get<long long>());
+        std::cout << " [x] Sending message " << message_id << " (" << item["message_name"] << ")..." << std::flush;
         
         int target = item.value("target", 0);
         std::string subject = "test.receiver." + std::to_string(target);
@@ -49,7 +50,7 @@ int main() {
         long long msg_start = get_current_time_ms();
         natsMsg *reply = NULL;
         std::string body = item.dump();
-        s = natsConnection_Request(&reply, conn, subject.c_str(), body.c_str(), (int)body.size(), 2000);
+        s = natsConnection_Request(&reply, conn, subject.c_str(), body.c_str(), (int)body.size(), 40);
         
         if (s == NATS_OK) {
             try {

@@ -2,6 +2,7 @@
 import subprocess
 import time
 import sys
+import argparse
 
 class Logger:
     def __init__(self, filename):
@@ -54,7 +55,22 @@ def run_test(service, sender, py_receivers, cpp_receivers, report_file, logger, 
         print(f"[!] Test failed with exception: {e}\n")
 
 def main():
-    services = ['grpc', 'zeromq', 'redis', 'rabbitmq', 'nats', 'activemq']
+    parser = argparse.ArgumentParser(description="Run messaging service tests")
+    parser.add_argument("--service", type=str, help="Run tests for a specific service (e.g., zeromq, grpc, redis, rabbitmq, nats, activemq)")
+    parser.add_argument("--all", action="store_true", help="Run all services (default behavior)")
+    args = parser.parse_args()
+    
+    all_services = ['grpc', 'zeromq', 'redis', 'rabbitmq', 'nats', 'activemq']
+    
+    # Determine which services to run
+    if args.service:
+        if args.service not in all_services:
+            print(f"Error: Unknown service '{args.service}'")
+            print(f"Available services: {', '.join(all_services)}")
+            sys.exit(1)
+        services = [args.service]
+    else:
+        services = all_services
     
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     report_file = f"report{timestamp}.json"
@@ -65,15 +81,16 @@ def main():
     
     print(f"Results will be written to {report_file}")
     print(f"Log will be written to {log_file}")
+    print(f"Services to test: {', '.join(services)}")
 
     spreads = [
         # (32, 0),
-        (31, 1),
+        # (31, 1),
         # (24, 8),
         # (20, 12),
-        # (16, 16),
+        (16, 16),
         # (8, 24),
-        (1, 31),
+        # (1, 31),
         # (0, 32)
     ]
 
@@ -101,3 +118,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
