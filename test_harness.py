@@ -14,17 +14,19 @@ import signal
 from pathlib import Path
 
 class TestHarness:
-    def __init__(self, service: str, sender_lang: str, py_receivers: int, cpp_receivers: int, async_sender: bool = False, async_receiver: bool = False):
+    def __init__(self, service: str, sender_lang: str, py_receivers: int, cpp_receivers: int, async_sender: bool = False, async_receiver: bool = False, base_port: int = 50051):
         self.service = service
         self.sender_lang = sender_lang
         self.py_receivers = py_receivers
         self.cpp_receivers = cpp_receivers
         self.async_sender = async_sender
         self.async_receiver = async_receiver
-        self.total_receivers = py_receivers + cpp_receivers
+        self.base_port = base_port
         self.receiver_procs = []
         self.sender_proc = None
-        self.base_dir = Path(__file__).parent.parent
+        # Use resolve() to get absolute path, then get parent
+        # Get the base directory where this script is located
+        self.base_dir = Path(__file__).resolve().parent
         
         # Service directory mapping
         self.service_dirs = {
@@ -36,6 +38,16 @@ class TestHarness:
             'activemq': 'activeMQ'
         }
         
+        # Language subdirectory mapping for each service
+        self.lang_dirs = {
+            'redis': {'python': 'python', 'cpp': 'cpp'},
+            'rabbitmq': {'python': 'python', 'cpp': 'cpp'},
+            'zeromq': {'python': 'python', 'cpp': 'cpp'},
+            'nats': {'python': 'python', 'cpp': 'cpp'},
+            'grpc': {'python': 'python', 'cpp': 'cpp'},
+            'activemq': {'python': 'python-client', 'cpp': 'cpp-client'}
+        }
+        
         # Consistent display names for reporting
         self.service_display_names = {
             'redis': 'Redis',
@@ -45,35 +57,75 @@ class TestHarness:
             'grpc': 'gRPC',
             'activemq': 'ActiveMQ'
         }
+    
+    @property
+    def total_receivers(self):
+        return self.py_receivers + self.cpp_receivers
         
     def get_service_path(self) -> Path:
         return self.base_dir / self.service_dirs[self.service]
     
     def get_receiver_cmd(self, lang: str, receiver_id: int) -> list:
         service_path = self.get_service_path()
-        prefix = 'python' if lang == 'python' else 'cpp'
-        if self.service == 'activemq':
-            prefix = 'python-client' if lang == 'python' else 'cpp-client'
+        
+        # Get the language-specific subdirectory
+        lang_dir = self.lang_dirs.get(self.service, {}).get(lang, lang)
         
         script_name = 'receiver_async_test' if self.async_receiver else 'receiver_test'
         
         if lang == 'python':
-            return ['python3', str(service_path / prefix / f'{script_name}.py'), '--id', str(receiver_id)]
+            script_path = service_path / lang_dir / f'{script_name}.py'
+            # Validate that the script exists
+            if not script_path.exists():
+                raise FileNotFoundError(f"Receiver Python script not found: {script_path}")
+            
+            cmd = ['python3', '-u', str(script_path), '--id', str(receiver_id)]
+            # Add base_port for gRPC
+            if self.service == 'grpc':
+                cmd.extend(['--server-port', str(self.base_port)])
+            return cmd
         else:  # cpp
-            return [str(service_path / prefix / 'build' / 'bin' / script_name), '--id', str(receiver_id)]
+            exe_path = service_path / lang_dir / 'build' / 'bin' / script_name
+            # Validate that the executable exists
+            if not exe_path.exists():
+                raise FileNotFoundError(f"Receiver C++ executable not found: {exe_path}")
+            
+            cmd = [str(exe_path), '--id', str(receiver_id)]
+            # Add base_port for gRPC
+            if self.service == 'grpc':
+                cmd.extend(['--server-port', str(self.base_port)])
+            return cmd
     
     def get_sender_cmd(self) -> list:
         service_path = self.get_service_path()
-        prefix = 'python' if self.sender_lang == 'python' else 'cpp'
-        if self.service == 'activemq':
-            prefix = 'python-client' if self.sender_lang == 'python' else 'cpp-client'
-            
+        
+        # Get the language-specific subdirectory
+        lang_dir = self.lang_dirs.get(self.service, {}).get(self.sender_lang, self.sender_lang)
+        
         script_name = 'sender_async_test' if self.async_sender else 'sender_test'
             
         if self.sender_lang == 'python':
-            return ['python3', str(service_path / prefix / f'{script_name}.py')]
+            script_path = service_path / lang_dir / f'{script_name}.py'
+            # Validate that the script exists
+            if not script_path.exists():
+                raise FileNotFoundError(f"Sender Python script not found: {script_path}")
+            
+            cmd = ['python3', '-u', str(script_path)]
+            # Add base_port and num_receivers for gRPC
+            if self.service == 'grpc':
+                cmd.extend(['--base-port', str(self.base_port), '--num-receivers', str(self.total_receivers)])
+            return cmd
         else:  # cpp
-            return [str(service_path / prefix / 'build' / 'bin' / script_name)]
+            exe_path = service_path / lang_dir / 'build' / 'bin' / script_name
+            # Validate that the executable exists
+            if not exe_path.exists():
+                raise FileNotFoundError(f"Sender C++ executable not found: {exe_path}")
+            
+            cmd = [str(exe_path)]
+            # Add base_port and num_receivers for gRPC
+            if self.service == 'grpc':
+                cmd.extend(['--base-port', str(self.base_port), '--num-receivers', str(self.total_receivers)])
+            return cmd
     
     def spawn_receivers(self):
         mode_str = "ASYNC" if self.async_receiver else "SYNC"
@@ -83,29 +135,61 @@ class TestHarness:
         
         # Spawn Python receivers
         for i in range(self.py_receivers):
-            cmd = self.get_receiver_cmd('python', receiver_id)
-            log_file = open(f'/tmp/receiver_{receiver_id}.log', 'w')
+            try:
+                cmd = self.get_receiver_cmd('python', receiver_id)
+            except FileNotFoundError as e:
+                print(f"  [!] ERROR: {e}", flush=True)
+                raise
+            
+            log_suffix = "async" if self.async_receiver else "sync"
+            log_filename = f'logs/receiver/{self.service}_python_{log_suffix}_receiver_{receiver_id}.log'
+            log_file = open(log_filename, 'w')
             proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
-            self.receiver_procs.append((proc, log_file, receiver_id, 'python'))
+            self.receiver_procs.append({
+                'proc': proc, 
+                'log_file': log_file, 
+                'log_path': log_filename,
+                'id': receiver_id, 
+                'lang': 'python'
+            })
             print(f"  [+] Receiver {receiver_id} (Python) started, PID={proc.pid}", flush=True)
             receiver_id += 1
         
         # Spawn C++ receivers
         for i in range(self.cpp_receivers):
-            cmd = self.get_receiver_cmd('cpp', receiver_id)
-            log_file = open(f'/tmp/receiver_{receiver_id}.log', 'w')
+            try:
+                cmd = self.get_receiver_cmd('cpp', receiver_id)
+            except FileNotFoundError as e:
+                print(f"  [!] ERROR: {e}", flush=True)
+                raise
+            
+            log_suffix = "async" if self.async_receiver else "sync"
+            log_filename = f'logs/receiver/{self.service}_cpp_{log_suffix}_receiver_{receiver_id}.log'
+            log_file = open(log_filename, 'w')
             proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
-            self.receiver_procs.append((proc, log_file, receiver_id, 'cpp'))
+            self.receiver_procs.append({
+                'proc': proc, 
+                'log_file': log_file, 
+                'log_path': log_filename,
+                'id': receiver_id, 
+                'lang': 'cpp'
+            })
             print(f"  [+] Receiver {receiver_id} (C++) started, PID={proc.pid}", flush=True)
             receiver_id += 1
         
         # Give receivers time to start
-        time.sleep(2)
+        time.sleep(4)
     
     def run_sender(self):
         mode_str = "ASYNC" if self.async_sender else "SYNC"
         print(f"[Harness] Starting {mode_str} sender ({self.sender_lang})...", flush=True)
-        cmd = self.get_sender_cmd()
+        
+        try:
+            cmd = self.get_sender_cmd()
+        except FileNotFoundError as e:
+            print(f"[!] ERROR: {e}", flush=True)
+            raise
+        
         self.sender_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         
         # Stream sender output
@@ -113,9 +197,13 @@ class TestHarness:
             print(f"  [Sender] {line.rstrip()}", flush=True)
             
             # Periodically check if receivers are still alive
-            for proc, log_file, receiver_id, lang in self.receiver_procs:
+            for rec in self.receiver_procs:
+                proc = rec['proc']
+                receiver_id = rec['id']
+                lang = rec['lang']
+                log_path = rec['log_path']
                 if proc.poll() is not None:
-                    print(f"  [!] Receiver {receiver_id} ({lang}) CRASHED with exit code {proc.returncode}. Check /tmp/receiver_{receiver_id}.log", flush=True)
+                    print(f"  [!] Receiver {receiver_id} ({lang}) CRASHED with exit code {proc.returncode}. Check {log_path}", flush=True)
                     self.sender_proc.terminate()
                     return
         
@@ -124,7 +212,11 @@ class TestHarness:
     
     def stop_receivers(self):
         print("[Harness] Stopping receivers...")
-        for proc, log_file, receiver_id, lang in self.receiver_procs:
+        for rec in self.receiver_procs:
+            proc = rec['proc']
+            log_file = rec['log_file']
+            receiver_id = rec['id']
+            lang = rec['lang']
             proc.terminate()
             try:
                 proc.wait(timeout=5)
@@ -143,8 +235,10 @@ class TestHarness:
             'receiver_stats': []
         }
         
-        for _, _, receiver_id, lang in self.receiver_procs:
-            log_path = f'/tmp/receiver_{receiver_id}.log'
+        for rec in self.receiver_procs:
+            receiver_id = rec['id']
+            lang = rec['lang']
+            log_path = rec['log_path']
             if os.path.exists(log_path):
                 with open(log_path, 'r') as f:
                     content = f.read()
@@ -182,22 +276,25 @@ class TestHarness:
                 env['JAVA_HOME'] = java17_home
             
             subprocess.run(cmd, check=True, env=env)
-            time.sleep(15) # Give it more time to start
+            time.sleep(30) # ActiveMQ can be slow to start all connectors
             return
         elif self.service == 'zeromq':
             # ZeroMQ uses P2P: receivers bind to ports directly, sender connects
             print(f"[Harness] ZeroMQ uses P2P - no central backend needed")
             return
         elif self.service == 'grpc':
-            # gRPC uses P2P: receivers bind to ports directly, sender connects
-            print(f"[Harness] gRPC uses P2P - no central backend needed")
+            # gRPC uses P2P: receivers act as gRPC servers
+            # Start receivers first (they bind to ports), then sender connects to them
+            print(f"[Harness] gRPC uses P2P - receivers bind to ports ({self.base_port}-{self.base_port + self.total_receivers - 1})")
+            # Don't start sender here - receivers will be started by spawn_receivers
+            # The sender will connect to receivers after they're running
             return
 
         if cmd:
-            log_file = open(f'/tmp/{self.service}_server.log', 'w')
+            log_file = open(f'logs/{self.service}_server.log', 'w')
             self.server_proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
             print(f"  [+] Server started, PID={self.server_proc.pid}")
-            time.sleep(3) # Wait for startup
+            time.sleep(5) # Wait for startup
 
     def stop_server(self):
         print(f"[Harness] Stopping backend for {self.service}...")
@@ -246,15 +343,21 @@ def main():
     parser.add_argument('--async-sender', action='store_true', help='Use asynchronous sender')
     parser.add_argument('--async-receiver', action='store_true', help='Use asynchronous receiver')
     parser.add_argument('--report', help='File to append results to')
+    parser.add_argument('--base-port', type=int, default=50051, help='Base port for services like gRPC')
+    parser.add_argument('--messages', type=int, help='Number of messages to generate (optional)')
     
     args = parser.parse_args()
     
-    if args.py_receivers + args.cpp_receivers != 32:
-        print(f"Warning: Total receivers is {args.py_receivers + args.cpp_receivers}, expected 32")
+    # Removed hardcoded receiver count check to allow dynamic sizing
     
-    report_path = os.path.join(os.getcwd(), 'report.txt')
+    report_path = os.path.join(os.getcwd(), 'logs/report.txt')
     if os.path.exists(report_path):
         os.remove(report_path) # Clear old results to only capture current run
+
+    # Generate data if messages specified
+    if args.messages:
+        print(f"[Harness] Generating data for {args.messages} messages and {args.py_receivers + args.cpp_receivers} receivers...")
+        subprocess.run(["python3", "generate_data.py", "--messages", str(args.messages), "--receivers", str(args.py_receivers + args.cpp_receivers)], check=True)
 
     harness = TestHarness(
         service=args.service,
@@ -262,7 +365,8 @@ def main():
         py_receivers=args.py_receivers,
         cpp_receivers=args.cpp_receivers,
         async_sender=args.async_sender,
-        async_receiver=args.async_receiver
+        async_receiver=args.async_receiver,
+        base_port=args.base_port
     )
     
     results = harness.run()

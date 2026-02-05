@@ -1,120 +1,114 @@
 #include <activemq/library/ActiveMQCPP.h>
-#include <decaf/lang/Thread.h>
-#include <decaf/lang/Runnable.h>
-#include <decaf/util/concurrent/CountDownLatch.h>
 #include <activemq/core/ActiveMQConnectionFactory.h>
-#include <activemq/util/Config.h>
 #include <cms/Connection.h>
 #include <cms/Session.h>
-#include <cms/TextMessage.h>
-#include <cms/ExceptionListener.h>
+#include <cms/BytesMessage.h>
 #include <cms/MessageListener.h>
-#include <stdlib.h>
-#include <stdio.h>
 #include <iostream>
-#include <memory>
 #include <string>
 #include <signal.h>
-#include "../../include/json.hpp"
+#include <atomic>
+#include <thread>
+#include "../../utils/cpp/message_helpers.hpp"
 
 using namespace activemq::core;
-using namespace decaf::util::concurrent;
-using namespace decaf::lang;
 using namespace cms;
 using namespace std;
-using json = nlohmann::json;
+using messaging::MessageEnvelope;
+using message_helpers::get_current_time_ms;
 
-bool running = true;
+atomic<bool> running(true);
 
 void signal_handler(int sig) {
     running = false;
 }
 
-class AsyncReceiver : public MessageListener {
+class AsyncRequestListener : public MessageListener {
 private:
     Session* session;
+    MessageProducer* producer;
     int receiver_id;
-    int messages_received;
-
 public:
-    AsyncReceiver(Session* session, int id) : session(session), receiver_id(id), messages_received(0) {}
-
+    AsyncRequestListener(Session* s, MessageProducer* p, int id) 
+        : session(s), producer(p), receiver_id(id) {}
+    
     virtual void onMessage(const Message* message) {
-        messages_received++;
-        const TextMessage* textMessage = dynamic_cast<const TextMessage*>(message);
-        if (textMessage != NULL) {
-            try {
-                string body = textMessage->getText();
-                json data = json::parse(body);
-                // Handle message_id that could be either string or numeric
-                string message_id;
-                if (data["message_id"].is_string()) {
-                    message_id = data["message_id"].get<std::string>();
-                } else {
-                    message_id = std::to_string(data["message_id"].get<int>());
+        try {
+            const BytesMessage* bytesMsg = dynamic_cast<const BytesMessage*>(message);
+            if (bytesMsg) {
+                // Read message
+                unsigned char* buffer = new unsigned char[bytesMsg->getBodyLength()];
+                bytesMsg->readBytes(buffer, bytesMsg->getBodyLength());
+                string request_str((char*)buffer, bytesMsg->getBodyLength());
+                delete[] buffer;
+                
+                // Parse message
+                MessageEnvelope msg_envelope;
+                if (message_helpers::parse_envelope(request_str, msg_envelope)) {
+                    string message_id = msg_envelope.message_id();
+                    cout << " [x] [ASYNC] Received message " << message_id << endl;
+                    
+                    // Create ACK
+                    MessageEnvelope response = message_helpers::create_ack_from_envelope(
+                        msg_envelope,
+                        to_string(receiver_id)
+                    );
+                    response.set_async(true);
+                    string response_str = message_helpers::serialize_envelope(response);
+                    
+                    // Send ACK
+                    auto_ptr<BytesMessage> reply(session->createBytesMessage(
+                        (unsigned char*)response_str.data(), response_str.size()));
+                    reply->setCMSCorrelationID(message->getCMSCorrelationID());
+                    
+                    producer->send(message->getCMSReplyTo(), reply.get());
                 }
-
-                cout << " [Receiver " << receiver_id << "] [ASYNC] Received message " << message_id << endl;
-
-                const Destination* replyTo = message->getCMSReplyTo();
-                if (replyTo != NULL) {
-                    json resp;
-                    resp["status"] = "ACK";
-                    resp["message_id"] = data["message_id"];  // Keep original type
-                    resp["receiver_id"] = receiver_id;
-                    resp["async"] = true;
-
-                    unique_ptr<MessageProducer> producer(session->createProducer(replyTo));
-                    unique_ptr<TextMessage> ack(session->createTextMessage(resp.dump()));
-                    ack->setCMSCorrelationID(message->getCMSCorrelationID());
-                    producer->send(ack.get());
-                }
-            } catch (exception& e) {
-                cerr << " [!] Error: " << e.what() << endl;
             }
+        } catch (CMSException& e) {
+            cerr << " [!] Error: " << e.getMessage() << endl;
         }
     }
-
-    int get_messages_received() const { return messages_received; }
 };
 
-int main(int argc, char** argv) {
+int main(int argc, char* argv[]) {
     int receiver_id = 0;
-    for (int i = 1; i < argc; ++i) {
+    
+    for (int i = 1; i < argc; i++) {
         if (string(argv[i]) == "--id" && i + 1 < argc) {
             receiver_id = stoi(argv[i + 1]);
+            break;
         }
     }
-
+    
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
-
+    
     activemq::library::ActiveMQCPP::initializeLibrary();
 
-    string brokerURI = "failover:(tcp://localhost:61613)";
-    unique_ptr<ActiveMQConnectionFactory> factory(new ActiveMQConnectionFactory(brokerURI));
-
     try {
-        unique_ptr<Connection> connection(factory->createConnection());
+        auto_ptr<ConnectionFactory> factory(ConnectionFactory::createCMSConnectionFactory("tcp://localhost:61616"));
+        auto_ptr<Connection> connection(factory->createConnection());
         connection->start();
 
-        unique_ptr<Session> session(connection->createSession(Session::AUTO_ACKNOWLEDGE));
+        auto_ptr<Session> session(connection->createSession(Session::AUTO_ACKNOWLEDGE));
+        
         string queue_name = "test_queue_" + to_string(receiver_id);
-        unique_ptr<Queue> dest(session->createQueue(queue_name));
+        auto_ptr<Destination> destination(session->createQueue(queue_name));
+        auto_ptr<MessageProducer> producer(session->createProducer(NULL));
+        producer->setDeliveryMode(DeliveryMode::NON_PERSISTENT);
 
-        AsyncReceiver receiver(session.get(), receiver_id);
-        unique_ptr<MessageConsumer> consumer(session->createConsumer(dest.get()));
-        consumer->setMessageListener(&receiver);
+        AsyncRequestListener listener(session.get(), producer.get(), receiver_id);
+        auto_ptr<MessageConsumer> consumer(session->createConsumer(destination.get()));
+        consumer->setMessageListener(&listener);
 
-        cout << " [*] [ASYNC] Receiver " << receiver_id << " awaiting messages on " << queue_name << endl;
+        cout << " [*] [ASYNC] Receiver " << receiver_id << " waiting for messages on " << queue_name << endl;
 
         while (running) {
-            Thread::sleep(100);
+            this_thread::sleep_for(chrono::milliseconds(100));
         }
 
-        cout << " [x] [ASYNC] Receiver " << receiver_id << " shutting down (received " << receiver.get_messages_received() << " messages)" << endl;
-        
-        connection->stop();
+        cout << " [x] [ASYNC] Receiver " << receiver_id << " shutting down" << endl;
+
     } catch (CMSException& e) {
         e.printStackTrace();
     }

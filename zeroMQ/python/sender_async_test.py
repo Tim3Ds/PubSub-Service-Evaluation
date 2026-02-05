@@ -1,108 +1,111 @@
 #!/usr/bin/env python3
-"""
-ZeroMQ Async Sender with P2P support.
-Sends messages concurrently using asyncio.
-"""
+"""ZeroMQ Python Sender - Async"""
+import sys
+import json
+import asyncio
 import zmq
 import zmq.asyncio
-import json
-import sys
-import os
-import asyncio
-import time
+from pathlib import Path
 
-# Add harness to path for stats_collector
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../harness'))
-from stats_collector import MessageStats, get_current_time_ms
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
 
-async def send_message(ctx, sockets, locks, item, stats):
-    target = item.get('target', 0)
-    port = 5556 + target
+from message_helpers import *
+from test_data_loader import load_test_data
+from stats_collector import MessageStats
+
+
+async def send_message_task(context, item):
+    """Send a single message asynchronously."""
+    result = {'success': False, 'message_id': '', 'duration': 0, 'error': ''}
     
-    if target not in locks:
-        locks[target] = asyncio.Lock()
-    
-    async with locks[target]:
-        # Get or create socket for this target
-        if target not in sockets:
-            sock = ctx.socket(zmq.REQ)
-            sock.connect(f"tcp://localhost:{port}")
-            sock.setsockopt(zmq.RCVTIMEO, 500)  # 500ms timeout (async C++ receiver responsiveness)
-            sockets[target] = sock
+    socket = None
+    try:
+        message_id = extract_message_id(item)
+        result['message_id'] = message_id
+        target = item.get('target', 0)
+        port = 5556 + target
         
-        socket = sockets[target]
         msg_start = get_current_time_ms()
         
-        print(f" [x] [ASYNC] Sending message {item['message_id']} to target {target} (port {port})...")
+        # Create new socket for each request (REQ/REP async pattern)
+        socket = context.socket(zmq.REQ)
+        socket.connect(f"tcp://localhost:{port}")
         
-        try:
-            await socket.send_string(json.dumps(item))
-            response = await socket.recv_string()
-            resp_data = json.loads(response)
+        # Create and send message
+        envelope = create_data_envelope(item)
+        body = serialize_envelope(envelope)
+        
+        await socket.send(body)
+        
+        # Wait for reply with timeout
+        if await socket.poll(100): # 100ms
+            response = await socket.recv()
+            resp_envelope = parse_envelope(response)
             
-            if resp_data.get('status') == 'ACK' and resp_data.get('message_id') == item['message_id']:
-                msg_duration = get_current_time_ms() - msg_start
-                stats.record_message(True, msg_duration)
-                print(f" [OK] Message {item['message_id']} acknowledged")
+            if is_valid_ack(resp_envelope, message_id):
+                result['duration'] = get_current_time_ms() - msg_start
+                result['success'] = True
             else:
-                stats.record_message(False)
-                print(f" [FAILED] Unexpected response for {item['message_id']}: {response}")
-        except zmq.error.Again:
-            stats.record_message(False)
-            print(f" [FAILED] Timeout for message {item['message_id']}")
+                result['error'] = 'Invalid ACK'
+        else:
+            result['error'] = 'Timeout'
+            
+    except Exception as e:
+        result['error'] = str(e)
+    finally:
+        if socket:
             socket.close()
-            if target in sockets: del sockets[target]
-        except Exception as e:
-            stats.record_message(False)
-            print(f" [FAILED] Error for message {item['message_id']}: {e}")
-            socket.close()
-            if target in sockets: del sockets[target]
+    
+    return result
 
-async def main():
-    print(" [x] Starting ZeroMQ ASYNC Sender")
-    ctx = zmq.asyncio.Context()
-    sockets = {}
-    locks = {}
 
-    data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../test_data.json'))
-    with open(data_path, 'r') as f:
-        test_data = json.load(f)
-
+async def run():
+    test_data = load_test_data()
+    
     stats = MessageStats()
-    stats.start_time = get_current_time_ms()
-
-    print(f" [x] Starting async transfer of {len(test_data)} messages...")
-
-    # We can use a semaphore to limit concurrency if desired, 
-    # but for P2P we have up to 32 receivers.
-    tasks = []
-    for item in test_data:
-        tasks.append(send_message(ctx, sockets, locks, item, stats))
+    stats.set_metadata({
+        'service': 'ZeroMQ',
+        'language': 'Python',
+        'async': True
+    })
+    start_time = get_current_time_ms()
     
-    await asyncio.gather(*tasks)
-
-    stats.end_time = get_current_time_ms()
+    print(f" [x] Starting ASYNC transfer of {len(test_data)} messages...")
     
-    report = {
-        "service": "ZeroMQ",
-        "language": "Python",
-        "async": True,
-        **stats.get_stats()
-    }
-
+    context = zmq.asyncio.Context()
+    
+    tasks = [send_message_task(context, item) for item in test_data]
+    results = await asyncio.gather(*tasks)
+    
+    for result in results:
+        if result['success']:
+            stats.record_message(True, result['duration'])
+            print(f" [OK] Message {result['message_id']} acknowledged")
+        else:
+            stats.record_message(False)
+            print(f" [FAILED] Message {result['message_id']}: {result['error']}")
+    
+    context.term()
+    
+    end_time = get_current_time_ms()
+    stats.set_duration(start_time, end_time)
+    
+    report = stats.get_stats()
+    
     print("\nTest Results (ASYNC):")
-    for k, v in report.items():
-        if k != 'message_timing_stats':
-            print(f"{k}: {v}")
+    print(f"total_sent: {stats.sent_count}")
+    print(f"total_received: {stats.received_count}")
+    print(f"duration_ms: {stats.get_duration_ms()}")
+    
+    with open('logs/report.txt', 'a') as f:
+        f.write(json.dumps(report) + '\n')
 
-    report_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../report.txt'))
-    with open(report_path, 'a') as f:
-        f.write(json.dumps(report) + "\n")
 
-    # Cleanup
-    for sock in sockets.values():
-        sock.close()
-    ctx.term()
+def main():
+    asyncio.run(run())
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

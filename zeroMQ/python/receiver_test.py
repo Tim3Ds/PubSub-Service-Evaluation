@@ -1,61 +1,63 @@
 #!/usr/bin/env python3
-"""
-ZeroMQ Receiver with P2P support for multi-receiver testing.
-Uses REP socket bound to port 5556 + receiver_id for direct sender connections.
-Usage: python receiver_test.py --id <0-31>
-"""
-import zmq
-import json
-import argparse
-import signal
+"""ZeroMQ Python Receiver - Sync"""
 import sys
+import signal
+import zmq
+from pathlib import Path
 
-class ZeroMQReceiver:
-    def __init__(self, receiver_id):
-        self.receiver_id = receiver_id
-        self.port = 5556 + receiver_id
-        self.messages_received = 0
-        self.ctx = zmq.Context()
-        self.socket = self.ctx.socket(zmq.REP)
-        self.socket.bind(f"tcp://*:{self.port}")
-    
-    def handle_signal(self, signum, frame):
-        print(f" [x] Receiver {self.receiver_id} shutting down (received {self.messages_received} messages)")
-        self.socket.close()
-        self.ctx.term()
-        sys.exit(0)
-    
-    def run(self):
-        signal.signal(signal.SIGTERM, self.handle_signal)
-        signal.signal(signal.SIGINT, self.handle_signal)
-        
-        print(f" [*] Receiver {self.receiver_id} bound to port {self.port}, awaiting requests")
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
 
-        while True:
-            try:
-                message = self.socket.recv_string()
-                data = json.loads(message)
-                message_id = data.get('message_id')
-                self.messages_received += 1
-                print(f" [Receiver {self.receiver_id}] Received message {message_id}")
-                
-                response = json.dumps({
-                    "status": "ACK",
-                    "message_id": message_id,
-                    "receiver_id": self.receiver_id
-                })
-                self.socket.send_string(response)
-            except Exception as e:
-                print(f" [!] Error processing message: {e}")
-                self.socket.send_string(json.dumps({"status": "ERROR", "message": str(e)}))
+from message_helpers import *
+
+running = True
+
+def signal_handler(sig, frame):
+    global running
+    running = False
 
 def main():
-    parser = argparse.ArgumentParser(description='ZeroMQ Receiver')
-    parser.add_argument('--id', type=int, default=0, help='Receiver ID (0-31)')
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--id', type=int, default=0)
     args = parser.parse_args()
     
-    receiver = ZeroMQReceiver(args.id)
-    receiver.run()
+    receiver_id = args.id
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    context = zmq.Context()
+    socket = context.socket(zmq.REP)
+    port = 5556 + receiver_id
+    socket.bind(f"tcp://*:{port}")
+    
+    print(f" [*] Receiver {receiver_id} listening on port {port}")
+    
+    while running:
+        try:
+            # Non-blocking check or poll would be better but simple blocking with signal works on py3
+            # Using poller to allow graceful shutdown
+            if socket.poll(100):
+                message = socket.recv()
+                
+                request_envelope = parse_envelope(message)
+                message_id = request_envelope.message_id
+                print(f" [x] Received message {message_id}")
+                
+                # Create ACK
+                response = create_ack_from_envelope(request_envelope, str(receiver_id))
+                resp_str = serialize_envelope(response)
+                
+                socket.send(resp_str)
+        except zmq.ZMQError as e:
+            if running:
+                print(f"Error: {e}")
+                
+    print(f" [x] Receiver {receiver_id} shutting down")
+    socket.close()
+    context.term()
+
 
 if __name__ == "__main__":
     main()

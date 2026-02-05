@@ -31,6 +31,14 @@ public:
         end_time = end_ms;
     }
     
+    void set_metadata(const json& meta) {
+        metadata = meta;
+    }
+    
+    void add_metadata(const std::string& key, const json& value) {
+        metadata[key] = value;
+    }
+    
     double get_duration_ms() const {
         if (start_time > 0 && end_time > 0) {
             return end_time - start_time;
@@ -39,7 +47,7 @@ public:
     }
     
     json get_stats() const {
-        json stats;
+        json stats = metadata;
         double duration = get_duration_ms();
         
         stats["total_sent"] = sent_count;
@@ -47,7 +55,7 @@ public:
         stats["total_processed"] = processed_count;
         stats["total_failed"] = failed_count;
         stats["duration_ms"] = duration;
-        stats["processed_per_ms"] = duration > 0 ? (double)processed_count / duration : 0.0;
+        stats["messages_per_ms"] = duration > 0 ? (double)processed_count / duration : 0.0;
         stats["failed_per_ms"] = duration > 0 ? (double)failed_count / duration : 0.0;
         
         if (!message_timings.empty()) {
@@ -98,11 +106,7 @@ private:
     std::vector<double> message_timings;
     long long start_time = 0;
     long long end_time = 0;
+    json metadata = json::object();
 };
-
-inline long long get_current_time_ms() {
-    auto now = std::chrono::system_clock::now();
-    return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-}
 
 #endif // STATS_COLLECTOR_HPP

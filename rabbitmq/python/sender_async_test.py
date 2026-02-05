@@ -1,128 +1,124 @@
 #!/usr/bin/env python3
-"""
-RabbitMQ Async Sender with targeted routing.
-Uses aio-pika for concurrent RPC calls.
-"""
+"""RabbitMQ Python Sender - Async"""
+import sys
+import json
 import asyncio
 import aio_pika
-import json
-import uuid
-import sys
-import os
-import time
+from pathlib import Path
 
-# Add harness to path for stats_collector
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../harness'))
-from stats_collector import MessageStats, get_current_time_ms
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
 
-class RabbitMQAsyncSender:
-    def __init__(self):
-        self.connection = None
-        self.channel = None
-        self.callback_queue = None
-        self.futures = {}
+from message_helpers import *
+from test_data_loader import load_test_data
+from stats_collector import MessageStats
 
-    async def connect(self):
-        self.connection = await aio_pika.connect_robust("amqp://guest:guest@localhost/")
-        self.channel = await self.connection.channel()
+
+async def send_message_task(channel, item):
+    """Send a single message asynchronously."""
+    result = {'success': False, 'message_id': '', 'duration': 0, 'error': ''}
+    
+    try:
+        message_id = extract_message_id(item)
+        result['message_id'] = message_id
+        target = item.get('target', 0)
         
-        # Declare queues for all 32 receivers
-        for i in range(32):
-            await self.channel.declare_queue(f'test_queue_{i}')
+        queue_name = f"test_queue_{target}"
+        msg_start = get_current_time_ms()
         
-        self.callback_queue = await self.channel.declare_queue(exclusive=True)
-        await self.callback_queue.consume(self.on_response)
-
-    async def on_response(self, message: aio_pika.IncomingMessage):
-        async with message.process():
-            corr_id = message.correlation_id
-            if corr_id in self.futures:
-                self.futures[corr_id].set_result(message.body)
-
-    async def call(self, message_data):
-        corr_id = str(uuid.uuid4())
-        future = asyncio.get_event_loop().create_future()
-        self.futures[corr_id] = future
+        # Declare reply queue (exclusive)
+        reply_queue = await channel.declare_queue(exclusive=True)
         
-        target = message_data.get('target', 0)
-        queue_name = f'test_queue_{target}'
+        # Create and send message
+        envelope = create_data_envelope(item)
+        body = serialize_envelope(envelope)
         
-        await self.channel.default_exchange.publish(
+        future = channel.default_exchange.publish(
             aio_pika.Message(
-                body=json.dumps(message_data).encode(),
-                correlation_id=corr_id,
-                reply_to=self.callback_queue.name,
+                body=body,
+                content_type='application/octet-stream',
+                correlation_id=message_id,
+                reply_to=reply_queue.name
             ),
-            routing_key=queue_name,
+            routing_key=queue_name
         )
+        await future
         
+        # Wait for reply
         try:
-            return await asyncio.wait_for(future, timeout=0.2)
+            async with reply_queue.iterator() as queue_iter:
+                async for message in queue_iter:
+                    async with message.process():
+                        resp_envelope = parse_envelope(message.body)
+                        if is_valid_ack(resp_envelope, message_id):
+                            result['duration'] = get_current_time_ms() - msg_start
+                            result['success'] = True
+                        else:
+                            result['error'] = 'Invalid ACK'
+                        break # Only expect one response
         except asyncio.TimeoutError:
-            return None
-        finally:
-            if corr_id in self.futures:
-                del self.futures[corr_id]
+            result['error'] = 'Timeout'
+            
+    except Exception as e:
+        result['error'] = str(e)
+    
+    return result
 
-async def send_message(sender, item, stats):
-    target = item.get('target', 0)
-    msg_start = get_current_time_ms()
-    print(f" [x] [ASYNC] Sending message {item['message_id']} to target {target}...")
+
+async def run():
+    test_data = load_test_data()
     
-    response = await sender.call(item)
+    stats = MessageStats()
+    stats.set_metadata({
+        'service': 'RabbitMQ',
+        'language': 'Python',
+        'async': True
+    })
+    start_time = get_current_time_ms()
     
-    if response:
-        try:
-            resp_data = json.loads(response)
-            if resp_data.get('status') == 'ACK' and resp_data.get('message_id') == item['message_id']:
-                msg_duration = get_current_time_ms() - msg_start
-                stats.record_message(True, msg_duration)
-                print(f" [OK] Message {item['message_id']} acknowledged")
+    print(f" [x] Starting ASYNC transfer of {len(test_data)} messages...")
+    
+    connection = await aio_pika.connect_robust("amqp://guest:guest@localhost/")
+    
+    async with connection:
+        # Create channel
+        channel = await connection.channel()
+        
+        # We need to process messages one by one or in batches as asyncio.gather 
+        # with dynamic reply queues can be resource intensive.
+        # For simplicity in this test pattern, we'll confirm strictly sequential async dispatch/wait
+        # To make it truly parallel, we'd need shared reply queues/correlation ID map.
+        # But mirroring C++ async test structure which uses futures:
+        
+        tasks = [send_message_task(await connection.channel(), item) for item in test_data]
+        results = await asyncio.gather(*tasks)
+        
+        for result in results:
+            if result['success']:
+                stats.record_message(True, result['duration'])
+                print(f" [OK] Message {result['message_id']} acknowledged")
             else:
                 stats.record_message(False)
-                print(f" [FAILED] Unexpected response for {item['message_id']}: {response}")
-        except Exception as e:
-            stats.record_message(False)
-            print(f" [FAILED] Parse error for {item['message_id']}: {e}")
-    else:
-        stats.record_message(False)
-        print(f" [FAILED] Timeout for {item['message_id']}")
-
-async def main():
-    sender = RabbitMQAsyncSender()
-    await sender.connect()
+                print(f" [FAILED] Message {result['message_id']}: {result['error']}")
     
-    data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../test_data.json'))
-    with open(data_path, 'r') as f:
-        test_data = json.load(f)
-
-    stats = MessageStats()
-    stats.start_time = get_current_time_ms()
-
-    print(f" [x] Starting transfer of {len(test_data)} messages (ASYNC)...")
-
-    tasks = [send_message(sender, item, stats) for item in test_data]
-    await asyncio.gather(*tasks)
-
-    stats.end_time = get_current_time_ms()
+    end_time = get_current_time_ms()
+    stats.set_duration(start_time, end_time)
     
-    report = {
-        "service": "RabbitMQ",
-        "language": "Python",
-        "async": True,
-        **stats.get_stats()
-    }
-
+    report = stats.get_stats()
+    
     print("\nTest Results (ASYNC):")
-    for k, v in report.items():
-        if k != 'message_timing_stats':
-            print(f"{k}: {v}")
+    print(f"total_sent: {stats.sent_count}")
+    print(f"total_received: {stats.received_count}")
+    print(f"duration_ms: {stats.get_duration_ms()}")
+    
+    with open('logs/report.txt', 'a') as f:
+        f.write(json.dumps(report) + '\n')
 
-    report_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../report.txt'))
-    with open(report_path, 'a') as f:
-        f.write(json.dumps(report) + "\n")
 
-    await sender.connection.close()
+def main():
+    asyncio.run(run())
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

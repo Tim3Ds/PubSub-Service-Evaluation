@@ -1,88 +1,121 @@
 #!/usr/bin/env python3
-"""
-gRPC Async Sender with targeted routing.
-Uses grpc.aio for concurrent RPC calls.
-"""
+"""gRPC Python Sender - Async"""
+import sys
+import json
 import asyncio
 import grpc
-import test_data_pb2
-import test_data_pb2_grpc
-import json
-import sys
-import os
-import time
+from pathlib import Path
 
-# Add harness to path for stats_collector
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../harness'))
-from stats_collector import MessageStats, get_current_time_ms
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
 
-async def send_message(stubs, item, stats):
-    target = item.get('target', 0)
-    message_id = int(item['message_id'])
-    msg_start = get_current_time_ms()
-    print(f" [x] [ASYNC] Sending message {message_id} to target {target}...")
+import messaging_pb2
+import messaging_pb2_grpc
+from message_helpers import *
+from test_data_loader import load_test_data
+from stats_collector import MessageStats
+
+
+async def send_message_task(stubs, item):
+    """Send a single message asynchronously."""
+    result = {'success': False, 'message_id': '', 'duration': 0, 'error': ''}
+    
     try:
-        request = test_data_pb2.TestDataItem(
-            message_id=message_id,
-            message_name=item['message_name'],
-            message_value=item['message_value'],
-            target=target
-        )
-        response = await stubs[target].TransferData(request, timeout=0.04)
+        message_id = extract_message_id(item)
+        result['message_id'] = message_id
+        target = item.get('target', 0)
         
-        if response.status == 'ACK' and response.message_id == message_id:
-            msg_duration = get_current_time_ms() - msg_start
-            stats.record_message(True, msg_duration)
-            print(f" [OK] Message {item['message_id']} acknowledged")
+        stub = stubs.get(target)
+        if not stub:
+             # Should create channel dynamically but for brevity assuming pre-created
+             # In real async app, would manage pool
+             result['error'] = 'No connection to target'
+             return result
+             
+        msg_start = get_current_time_ms()
+        
+        envelope = create_data_envelope(item)
+        
+        response = await stub.SendMessage(envelope)
+        
+        if is_valid_ack(response, message_id):
+            result['duration'] = get_current_time_ms() - msg_start
+            result['success'] = True
+        else:
+            result['error'] = 'Invalid ACK'
+            
+    except grpc.RpcError as e:
+        result['error'] = f"RPC Error: {e.code()}"
+    except Exception as e:
+        result['error'] = str(e)
+    
+    return result
+
+
+async def run(base_port, num_receivers):
+    test_data = load_test_data()
+    
+    stats = MessageStats()
+    stats.set_metadata({
+        'service': 'gRPC',
+        'language': 'Python',
+        'async': True
+    })
+    start_time = get_current_time_ms()
+    
+    print(f" [x] Starting ASYNC transfer of {len(test_data)} messages...")
+    
+    # Pre-create channels/stubs
+    channels = []
+    stubs = {}
+    targets = set(item.get('target', 0) for item in test_data)
+    
+    for target in targets:
+        port = base_port + target
+        channel = grpc.aio.insecure_channel(f'localhost:{port}')
+        stub = messaging_pb2_grpc.MessagingServiceStub(channel)
+        channels.append(channel)
+        stubs[target] = stub
+    
+    tasks = [send_message_task(stubs, item) for item in test_data]
+    results = await asyncio.gather(*tasks)
+    
+    # Cleanup
+    for channel in channels:
+        await channel.close()
+    
+    for result in results:
+        if result['success']:
+            stats.record_message(True, result['duration'])
+            print(f" [OK] Message {result['message_id']} acknowledged")
         else:
             stats.record_message(False)
-            print(f" [FAILED] Unexpected response for {item['message_id']}: {response.status}")
-    except Exception as e:
-        stats.record_message(False)
-        print(f" [FAILED] Error for {item['message_id']}: {e}")
-
-async def main():
-    data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../test_data.json'))
-    with open(data_path, 'r') as f:
-        test_data = json.load(f)
-
-    # Create channels for all 32 receivers
-    channels = {}
-    stubs = {}
-    for i in range(32):
-        port = 50051 + i
-        channels[i] = grpc.aio.insecure_channel(f'localhost:{port}')
-        stubs[i] = test_data_pb2_grpc.TestDataServiceStub(channels[i])
-
-    stats = MessageStats()
-    stats.start_time = get_current_time_ms()
-
-    print(f" [x] Starting transfer of {len(test_data)} messages (ASYNC)...")
-
-    tasks = [send_message(stubs, item, stats) for item in test_data]
-    await asyncio.gather(*tasks)
-
-    stats.end_time = get_current_time_ms()
+            print(f" [FAILED] Message {result['message_id']}: {result['error']}")
     
-    report = {
-        "service": "gRPC",
-        "language": "Python",
-        "async": True,
-        **stats.get_stats()
-    }
-
+    end_time = get_current_time_ms()
+    stats.set_duration(start_time, end_time)
+    
+    report = stats.get_stats()
+    
     print("\nTest Results (ASYNC):")
-    for k, v in report.items():
-        if k != 'message_timing_stats':
-            print(f"{k}: {v}")
+    print(f"total_sent: {stats.sent_count}")
+    print(f"total_received: {stats.received_count}")
+    print(f"duration_ms: {stats.get_duration_ms()}")
+    
+    with open('logs/report.txt', 'a') as f:
+        f.write(json.dumps(report) + '\n')
 
-    report_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../report.txt'))
-    with open(report_path, 'a') as f:
-        f.write(json.dumps(report) + "\n")
 
-    # Close channels
-    for ch in channels.values():
-        await ch.close()
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--base-port', type=int, default=50051)
+    parser.add_argument('--num-receivers', type=int, default=1)
+    args = parser.parse_args()
+    
+    asyncio.run(run(args.base_port, args.num_receivers))
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

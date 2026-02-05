@@ -1,50 +1,75 @@
 #!/usr/bin/env python3
-"""
-RabbitMQ Receiver with targeted routing support for multi-receiver testing.
-Each receiver listens on test_queue_{id} based on its assigned ID.
-Usage: python receiver_test.py --id <0-31>
-"""
+"""RabbitMQ Python Receiver - Sync"""
+import sys
+import signal
 import pika
-import json
-import argparse
+from pathlib import Path
+
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
+
+from message_helpers import *
+
+running = True
+
+def signal_handler(sig, frame):
+    global running
+    running = False
 
 def main():
-    parser = argparse.ArgumentParser(description='RabbitMQ Receiver')
-    parser.add_argument('--id', type=int, default=0, help='Receiver ID (0-31)')
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--id', type=int, default=0)
     args = parser.parse_args()
     
     receiver_id = args.id
-    queue_name = f'test_queue_{receiver_id}'
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
     channel = connection.channel()
-
+    
+    queue_name = f"test_queue_{receiver_id}"
     channel.queue_declare(queue=queue_name)
-
-    def on_request(ch, method, props, body):
-        try:
-            data = json.loads(body)
-            message_id = data.get('message_id')
-            
-            response = json.dumps({
-                "status": "ACK",
-                "message_id": message_id,
-                "receiver_id": receiver_id
-            })
-            
-            ch.basic_publish(exchange='',
-                             routing_key=props.reply_to,
-                             properties=pika.BasicProperties(correlation_id=props.correlation_id),
-                             body=response)
-            ch.basic_ack(delivery_tag=method.delivery_tag)
-        except Exception as e:
-            print(f" [!] Error processing message: {e}")
+    
+    print(f" [*] Receiver {receiver_id} waiting for messages on {queue_name}")
+    
+    # Process messages with basic_get (non-blocking) to yield to signal handler
+    # or ensure we check running flag
+    
+    def on_message(ch, method, properties, body):
+        request_envelope = parse_envelope(body)
+        message_id = request_envelope.message_id
+        print(f" [x] Received message {message_id}")
+        
+        # Create ACK
+        response = create_ack_from_envelope(request_envelope, str(receiver_id))
+        resp_str = serialize_envelope(response)
+        
+        # Send reply
+        ch.basic_publish(
+            exchange='',
+            routing_key=properties.reply_to,
+            body=resp_str,
+            properties=pika.BasicProperties(
+                correlation_id=properties.correlation_id,
+                content_type='application/octet-stream'
+            )
+        )
+        ch.basic_ack(delivery_tag=method.delivery_tag)
 
     channel.basic_qos(prefetch_count=1)
-    channel.basic_consume(queue=queue_name, on_message_callback=on_request)
+    channel.basic_consume(queue=queue_name, on_message_callback=on_message)
+    
+    try:
+        channel.start_consuming()
+    except KeyboardInterrupt:
+        pass
+    
+    print(f" [x] Receiver {receiver_id} shutting down")
+    connection.close()
 
-    print(f" [*] Receiver {receiver_id} awaiting messages on {queue_name}")
-    channel.start_consuming()
 
 if __name__ == "__main__":
     main()

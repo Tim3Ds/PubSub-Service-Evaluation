@@ -1,120 +1,51 @@
 #include <activemq/library/ActiveMQCPP.h>
 #include <decaf/lang/Thread.h>
-#include <decaf/lang/Runnable.h>
 #include <decaf/util/concurrent/CountDownLatch.h>
-#include <decaf/lang/Integer.h>
-#include <decaf/lang/Long.h>
-#include <decaf/lang/System.h>
 #include <activemq/core/ActiveMQConnectionFactory.h>
 #include <cms/Connection.h>
 #include <cms/Session.h>
 #include <cms/TextMessage.h>
 #include <cms/BytesMessage.h>
-#include <cms/MapMessage.h>
-#include <cms/ExceptionListener.h>
 #include <cms/MessageListener.h>
 #include <iostream>
 #include <fstream>
 #include <string>
-#include <chrono>
-#include "../../include/json.hpp"
+#include "../../utils/cpp/stats_collector.hpp"
+#include "../../utils/cpp/test_data_loader.hpp"
+#include "../../utils/cpp/message_helpers.hpp"
 
 using namespace activemq::core;
 using namespace decaf::util::concurrent;
-using namespace decaf::lang;
-using namespace cms;
-using namespace std;
-#include "../../include/stats_collector.hpp"
-
-using namespace activemq::core;
-using namespace decaf::util::concurrent;
-using namespace decaf::lang;
 using namespace cms;
 using namespace std;
 using json = nlohmann::json;
+using messaging::MessageEnvelope;
+using message_helpers::get_current_time_ms;
 
-class TestDataSender : public MessageListener {
+class ReplyListener : public MessageListener {
 private:
-    Connection* connection;
-    Session* session;
-    Destination* replyDestination;
-    MessageProducer* producer;
-    MessageConsumer* consumer;
     string response;
     string currentCorrId;
     CountDownLatch* latch;
-    int corrCounter;
-
 public:
-    TestDataSender(const string& brokerURI) {
-        connection = NULL;
-        session = NULL;
-        replyDestination = NULL;
-        producer = NULL;
-        consumer = NULL;
-        latch = NULL;
-        corrCounter = 0;
-
-        auto_ptr<ConnectionFactory> connectionFactory(ConnectionFactory::createCMSConnectionFactory(brokerURI));
-        connection = connectionFactory->createConnection();
-        connection->start();
-
-        session = connection->createSession(Session::AUTO_ACKNOWLEDGE);
-        replyDestination = session->createTemporaryQueue();
-
-        producer = session->createProducer(NULL);
-        producer->setDeliveryMode(DeliveryMode::NON_PERSISTENT);
-
-        consumer = session->createConsumer(replyDestination);
-        consumer->setMessageListener(this);
-    }
-
-    virtual ~TestDataSender() {
-        cleanup();
-    }
-
-    void cleanup() {
-        try {
-            if (connection != NULL) connection->close();
-        } catch (CMSException& e) {}
-        delete replyDestination;
-        delete producer;
-        delete consumer;
-        delete session;
-        delete connection;
-    }
-
-    virtual void onMessage(const Message* message) {
-        const TextMessage* textMessage = dynamic_cast<const TextMessage*>(message);
-        if (textMessage != NULL) {
-            if (message->getCMSCorrelationID() == currentCorrId) {
-                response = textMessage->getText();
-                if (latch != NULL) latch->countDown();
-            }
-        }
-    }
-
-    string sendAndWait(int target_id, const string& msgBody) {
+    ReplyListener() : latch(NULL) {}
+    
+    void setLatch(CountDownLatch* l, const string& corrId) {
+        latch = l;
+        currentCorrId = corrId;
         response = "";
-        currentCorrId = "corr-cpp-" + to_string(++corrCounter);
-        latch = new CountDownLatch(1);
-
-        auto_ptr<TextMessage> message(session->createTextMessage(msgBody));
-        message->setCMSReplyTo(replyDestination);
-        message->setCMSCorrelationID(currentCorrId);
-
-        string destName = "test_queue_" + to_string(target_id);
-        auto_ptr<Destination> destination(session->createQueue(destName));
-        producer->send(destination.get(), message.get());
-
-        if (latch->await(5000)) {
-            delete latch;
-            latch = NULL;
-            return response;
-        } else {
-            delete latch;
-            latch = NULL;
-            return "";
+    }
+    
+    string getResponse() { return response; }
+    
+    virtual void onMessage(const Message* message) {
+        const BytesMessage* bytesMsg = dynamic_cast<const BytesMessage*>(message);
+        if (bytesMsg && message->getCMSCorrelationID() == currentCorrId) {
+            unsigned char* buffer = new unsigned char[bytesMsg->getBodyLength()];
+            bytesMsg->readBytes(buffer, bytesMsg->getBodyLength());
+            response = string((char*)buffer, bytesMsg->getBodyLength());
+            delete[] buffer;
+            if (latch) latch->countDown();
         }
     }
 };
@@ -123,56 +54,67 @@ int main() {
     activemq::library::ActiveMQCPP::initializeLibrary();
 
     try {
-        string brokerURI = "tcp://localhost:61616";
-        TestDataSender client(brokerURI);
-
-        string data_path = "test_data.json";
-        ifstream f(data_path);
-        if (!f.good()) {
-            f.close();
-            data_path = "../../test_data.json";
-            f.open(data_path);
-        }
-        if (!f.good()) {
-            f.close();
-            data_path = "/home/tim/repos/test_data.json";
-            f.open(data_path);
-        }
+        auto test_data = test_data_loader::loadTestData();
         
-        if (!f.good()) {
-            cerr << " [!] Could not find test_data.json" << endl;
-            activemq::library::ActiveMQCPP::shutdownLibrary();
-            return 1;
-        }
-        
-        json test_data = json::parse(f);
-
         MessageStats stats;
+        stats.set_metadata({
+            {"service", "ActiveMQ"},
+            {"language", "C++"},
+            {"async", false}
+        });
         long long start_time = get_current_time_ms();
-        stats.set_duration(start_time, 0);
+
+        auto_ptr<ConnectionFactory> factory(ConnectionFactory::createCMSConnectionFactory("tcp://localhost:61616"));
+        auto_ptr<Connection> connection(factory->createConnection());
+        connection->start();
+
+        auto_ptr<Session> session(connection->createSession(Session::AUTO_ACKNOWLEDGE));
+        auto_ptr<Destination> replyDest(session->createTemporaryQueue());
+        auto_ptr<MessageProducer> producer(session->createProducer(NULL));
+        producer->setDeliveryMode(DeliveryMode::NON_PERSISTENT);
+
+        ReplyListener listener;
+        auto_ptr<MessageConsumer> consumer(session->createConsumer(replyDest.get()));
+        consumer->setMessageListener(&listener);
 
         cout << " [x] Starting transfer of " << test_data.size() << " messages..." << endl;
 
+        int corrCounter = 0;
         for (auto& item : test_data) {
+            string message_id = message_helpers::extract_message_id(item);
             int target = item.value("target", 0);
-            cout << " [x] Sending message " << item["message_id"] << " to target " << target << "..." << flush;
+            cout << " [x] Sending message " << message_id << " to target " << target << "..." << flush;
             
             long long msg_start = get_current_time_ms();
-            string response = client.sendAndWait(target, item.dump());
-            if (response != "") {
-                try {
-                    json resp_data = json::parse(response);
-                    if (resp_data["status"] == "ACK" && resp_data["message_id"] == item["message_id"]) {
-                        long long msg_duration = get_current_time_ms() - msg_start;
-                        stats.record_message(true, msg_duration);
-                        cout << " [OK]" << endl;
-                    } else {
-                        stats.record_message(false);
-                        cout << " [FAILED] Unexpected response" << endl;
-                    }
-                } catch (...) {
+            
+            // Create protobuf envelope
+            MessageEnvelope envelope = message_helpers::create_data_envelope(item);
+            string body = message_helpers::serialize_envelope(envelope);
+            
+            // Send as BytesMessage
+            auto_ptr<BytesMessage> message(session->createBytesMessage((unsigned char*)body.data(), body.size()));
+            message->setCMSReplyTo(replyDest.get());
+            message->setCMSCorrelationID("corr-cpp-" + to_string(++corrCounter));
+            
+            string destName = "test_queue_" + to_string(target);
+            auto_ptr<Destination> destination(session->createQueue(destName));
+            
+            CountDownLatch latch(1);
+            listener.setLatch(&latch, message->getCMSCorrelationID());
+            
+            producer->send(destination.get(), message.get());
+            
+            if (latch.await(40)) {  // 40ms timeout
+                string response = listener.getResponse();
+                MessageEnvelope resp_envelope;
+                if (message_helpers::parse_envelope(response, resp_envelope) && 
+                    message_helpers::is_valid_ack(resp_envelope, message_id)) {
+                    long long msg_duration = get_current_time_ms() - msg_start;
+                    stats.record_message(true, msg_duration);
+                    cout << " [OK]" << endl;
+                } else {
                     stats.record_message(false);
-                    cout << " [FAILED] Parse error" << endl;
+                    cout << " [FAILED] Invalid ACK" << endl;
                 }
             } else {
                 stats.record_message(false);
@@ -184,8 +126,6 @@ int main() {
         stats.set_duration(start_time, end_time);
         
         json report = stats.get_stats();
-        report["service"] = "ActiveMQ";
-        report["language"] = "C++";
 
         cout << "\nTest Results:" << endl;
         cout << "service: ActiveMQ" << endl;
@@ -193,11 +133,8 @@ int main() {
         cout << "total_sent: " << stats.sent_count << endl;
         cout << "total_received: " << stats.received_count << endl;
         cout << "duration_ms: " << stats.get_duration_ms() << endl;
-        if (report.contains("message_timing_stats")) {
-            cout << "message_timing_stats: " << report["message_timing_stats"].dump() << endl;
-        }
 
-        ofstream rf("report.txt", ios::app);
+        ofstream rf("logs/report.txt", ios::app);
         if (rf.good()) {
             rf << report.dump() << endl;
             rf.close();

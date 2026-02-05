@@ -1,6 +1,6 @@
 # Messaging Performance Benchmark Suite
 
-A comprehensive performance analysis and benchmarking tool for major messaging systems, supporting both **Python** and **C++** implementations. This project evaluates systems like Redis, RabbitMQ, ZeroMQ, NATS, gRPC, and ActiveMQ under various workloads, including multi-receiver stress tests.
+A comprehensive PubSub performance analysis and benchmarking tool for major messaging systems, supporting both **Python** and **C++** implementations. This project evaluates systems like Redis, RabbitMQ, ZeroMQ, NATS, gRPC, and ActiveMQ under various workloads, including multi-receiver stress tests.
 
 ## 🚀 Features
 

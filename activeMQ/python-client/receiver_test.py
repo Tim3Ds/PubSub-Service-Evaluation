@@ -1,62 +1,82 @@
 #!/usr/bin/env python3
-"""
-ActiveMQ Receiver with targeted routing support for multi-receiver testing.
-Each receiver subscribes to /queue/test_request_{id} based on its assigned ID.
-Usage: python receiver_test.py --id <0-31>
-"""
-import stomp
-import json
+"""ActiveMQ Python Receiver - Sync"""
+import sys
+import signal
 import time
-import argparse
+import stomp
+from pathlib import Path
 
-class ActiveMQReceiver(stomp.ConnectionListener):
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
+
+from message_helpers import *
+
+running = True
+
+def signal_handler(sig, frame):
+    global running
+    running = False
+
+class RequestListener(stomp.ConnectionListener):
     def __init__(self, conn, receiver_id):
         self.conn = conn
         self.receiver_id = receiver_id
-
+        
     def on_message(self, frame):
         try:
-            data = json.loads(frame.body)
-            message_id = data.get('message_id')
+            # Body should now be bytes since auto_decode=False
+            body = frame.body
+            if isinstance(body, str):
+                body = body.encode('latin-1')  # latin-1 preserves bytes 0-255
+                
+            request_envelope = parse_envelope(body)
+            message_id = request_envelope.message_id
+            print(f" [x] Received message {message_id}")
             
-            response = json.dumps({
-                "status": "ACK",
-                "message_id": message_id,
-                "receiver_id": self.receiver_id
-            })
-            reply_to = frame.headers.get('reply-to')
-            corr_id = frame.headers.get('correlation-id')
+            # Create ACK
+            response = create_ack_from_envelope(request_envelope, str(self.receiver_id))
+            resp_str = serialize_envelope(response)
             
-            if reply_to:
+            # Send reply
+            if 'reply-to' in frame.headers:
                 self.conn.send(
-                    destination=reply_to,
-                    body=response,
-                    headers={'correlation-id': corr_id}
+                    destination=frame.headers['reply-to'],
+                    body=resp_str,
+                    headers={
+                        'correlation-id': frame.headers.get('correlation-id'),
+                        'content-type': 'application/octet-stream'
+                    }
                 )
         except Exception as e:
-            print(f" [!] Error: {e}")
+            print(f"Error processing message: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description='ActiveMQ Receiver')
-    parser.add_argument('--id', type=int, default=0, help='Receiver ID (0-31)')
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--id', type=int, default=0)
     args = parser.parse_args()
     
     receiver_id = args.id
-    destination = f'/queue/test_queue_{receiver_id}'
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
-    conn = stomp.Connection(host_and_ports=[('localhost', 61613)])
-    receiver = ActiveMQReceiver(conn, receiver_id)
-    conn.set_listener('receiver', receiver)
-    conn.connect(wait=True)
-    conn.subscribe(destination=destination, id=1, ack='auto')
-
-    print(f" [*] Receiver {receiver_id} awaiting ActiveMQ requests on {destination}")
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        pass
+    conn = stomp.Connection([('localhost', 61613)], auto_decode=False)
+    listener = RequestListener(conn, receiver_id)
+    conn.set_listener('', listener)
+    conn.connect('admin', 'admin', wait=True)
+    
+    dest = f"/queue/test_queue_{receiver_id}"
+    conn.subscribe(destination=dest, id=1, ack='auto')
+    
+    print(f" [*] Receiver {receiver_id} waiting for messages on {dest}")
+    
+    while running:
+        time.sleep(0.1)
+        
+    print(f" [x] Receiver {receiver_id} shutting down")
     conn.disconnect()
+
 
 if __name__ == "__main__":
     main()

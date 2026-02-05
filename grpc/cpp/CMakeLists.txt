@@ -7,26 +7,34 @@ find_package(Threads REQUIRED)
 # Set default output directory for executables
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# Find package with local hints
-set(LOCAL_DEPS "${CMAKE_CURRENT_SOURCE_DIR}/build/deps")
+# Get repo root using git
+execute_process(
+    COMMAND git rev-parse --show-toplevel
+    OUTPUT_VARIABLE REPO_ROOT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+# Set path to local deps using repo root
+set(LOCAL_DEPS "${REPO_ROOT}/grpc/cpp/build/deps")
 set(CMAKE_PREFIX_PATH ${LOCAL_DEPS} ${CMAKE_PREFIX_PATH})
 
 find_package(Protobuf REQUIRED HINTS ${LOCAL_DEPS})
 find_package(gRPC REQUIRED HINTS ${LOCAL_DEPS})
 
 include_directories(${LOCAL_DEPS}/include)
-include_directories(/home/tim/repos/include)
+include_directories(${REPO_ROOT}/utils)
+include_directories(${REPO_ROOT}/utils/cpp)
 
-# Proto file
-set(PROTO_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../proto")
-set(PROTO_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}")
-set(PROTO_FILE "${PROTO_SRC_DIR}/pubsub.proto")
+# Proto file (using top-level messaging.proto)
+set(PROTO_SRC_DIR "${REPO_ROOT}/utils")
+set(PROTO_BINARY_DIR "${REPO_ROOT}/utils/cpp")
+set(PROTO_FILE "${PROTO_SRC_DIR}/messaging.proto")
 
 # Generated sources
-set(PROTO_SRCS "${PROTO_BINARY_DIR}/pubsub.pb.cc")
-set(PROTO_HDRS "${PROTO_BINARY_DIR}/pubsub.pb.h")
-set(GRPC_SRCS "${PROTO_BINARY_DIR}/pubsub.grpc.pb.cc")
-set(GRPC_HDRS "${PROTO_BINARY_DIR}/pubsub.grpc.pb.h")
+set(PROTO_SRCS "${PROTO_BINARY_DIR}/messaging.pb.cc")
+set(PROTO_HDRS "${PROTO_BINARY_DIR}/messaging.pb.h")
+set(GRPC_SRCS "${PROTO_BINARY_DIR}/messaging.grpc.pb.cc")
+set(GRPC_HDRS "${PROTO_BINARY_DIR}/messaging.grpc.pb.h")
 # Force correct programs
 set(_PROTOBUF_PROTOC "${CMAKE_CURRENT_SOURCE_DIR}/build/deps/bin/protoc")
 set(_GRPC_CPP_PLUGIN_EXECUTABLE "${CMAKE_CURRENT_SOURCE_DIR}/build/deps/bin/grpc_cpp_plugin")
@@ -43,46 +51,29 @@ add_custom_command(
   DEPENDS "${PROTO_FILE}"
 )
 
-# TestData proto
-set(TEST_PROTO_FILE "${PROTO_SRC_DIR}/test_data.proto")
-set(TEST_PROTO_SRCS "${PROTO_BINARY_DIR}/test_data.pb.cc")
-set(TEST_PROTO_HDRS "${PROTO_BINARY_DIR}/test_data.pb.h")
-set(TEST_GRPC_SRCS "${PROTO_BINARY_DIR}/test_data.grpc.pb.cc")
-set(TEST_GRPC_HDRS "${PROTO_BINARY_DIR}/test_data.grpc.pb.h")
-
-add_custom_command(
-  OUTPUT "${TEST_PROTO_SRCS}" "${TEST_PROTO_HDRS}" "${TEST_GRPC_SRCS}" "${TEST_GRPC_HDRS}"
-  COMMAND ${_PROTOBUF_PROTOC}
-  ARGS --grpc_out="${PROTO_BINARY_DIR}"
-       --cpp_out="${PROTO_BINARY_DIR}"
-       -I "${PROTO_SRC_DIR}"
-       --plugin=protoc-gen-grpc="${_GRPC_CPP_PLUGIN_EXECUTABLE}"
-       "${TEST_PROTO_FILE}"
-  DEPENDS "${TEST_PROTO_FILE}"
+add_library(messaging_proto
+  ${PROTO_SRCS}
+  ${GRPC_SRCS}
+  ${PROTO_HDRS}
+  ${GRPC_HDRS}
+  "${REPO_ROOT}/utils/cpp/test_data_loader.cpp"
 )
-
-add_library(test_data_proto
-  ${TEST_PROTO_SRCS}
-  ${TEST_GRPC_SRCS}
-  ${TEST_PROTO_HDRS}
-  ${TEST_GRPC_HDRS}
-)
-target_link_libraries(test_data_proto
+target_link_libraries(messaging_proto
   gRPC::grpc++
   protobuf::libprotobuf
 )
-target_include_directories(test_data_proto PUBLIC "${PROTO_BINARY_DIR}" "${Protobuf_INCLUDE_DIRS}")
+target_include_directories(messaging_proto PUBLIC "${PROTO_BINARY_DIR}" "${Protobuf_INCLUDE_DIRS}")
 
 # Targets
 add_executable(sender_test sender_test.cpp)
-target_link_libraries(sender_test test_data_proto gRPC::grpc++ protobuf::libprotobuf)
+target_link_libraries(sender_test messaging_proto gRPC::grpc++ protobuf::libprotobuf stdc++fs)
 
 add_executable(receiver_test receiver_test.cpp)
-target_link_libraries(receiver_test test_data_proto gRPC::grpc++ protobuf::libprotobuf)
+target_link_libraries(receiver_test messaging_proto gRPC::grpc++ protobuf::libprotobuf stdc++fs)
 
 add_executable(sender_async_test sender_async_test.cpp)
-target_link_libraries(sender_async_test test_data_proto gRPC::grpc++ protobuf::libprotobuf Threads::Threads)
+target_link_libraries(sender_async_test messaging_proto gRPC::grpc++ protobuf::libprotobuf Threads::Threads stdc++fs)
 
 add_executable(receiver_async_test receiver_async_test.cpp)
-target_link_libraries(receiver_async_test test_data_proto gRPC::grpc++ protobuf::libprotobuf Threads::Threads)
+target_link_libraries(receiver_async_test messaging_proto gRPC::grpc++ protobuf::libprotobuf Threads::Threads stdc++fs)
 

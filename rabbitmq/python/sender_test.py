@@ -1,115 +1,110 @@
 #!/usr/bin/env python3
-"""
-RabbitMQ Sender with targeted routing support for multi-receiver testing.
-Routes each message to test_queue_{target} based on the target field.
-"""
-import pika
-import json
-import uuid
+"""RabbitMQ Python Sender - Sync"""
 import sys
-import os
-import time
+import json
+import pika
+from pathlib import Path
 
-# Add harness to path for stats_collector
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../harness'))
-from stats_collector import MessageStats, get_current_time_ms
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
 
-class RabbitMQSender:
-    def __init__(self):
-        self.connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-        self.channel = self.connection.channel()
-        
-        # Declare queues for all 32 receivers
-        for i in range(32):
-            self.channel.queue_declare(queue=f'test_queue_{i}')
-        
-        result = self.channel.queue_declare(queue='', exclusive=True)
-        self.callback_queue = result.method.queue
-        
-        self.channel.basic_consume(
-            queue=self.callback_queue,
-            on_message_callback=self.on_response,
-            auto_ack=True)
-        
-        self.response = None
-        self.corr_id = None
+from message_helpers import *
+from test_data_loader import load_test_data
+from stats_collector import MessageStats
 
-    def on_response(self, ch, method, props, body):
-        if self.corr_id == props.correlation_id:
-            self.response = body
-
-    def call(self, message_data):
-        self.response = None
-        self.corr_id = str(uuid.uuid4())
-        target = message_data.get('target', 0)
-        queue_name = f'test_queue_{target}'
-        
-        self.channel.basic_publish(
-            exchange='',
-            routing_key=queue_name,
-            properties=pika.BasicProperties(
-                reply_to=self.callback_queue,
-                correlation_id=self.corr_id,
-            ),
-            body=json.dumps(message_data))
-        
-        start_wait = time.time()
-        while self.response is None and (time.time() - start_wait) < 0.2:
-            self.connection.process_data_events()
-        return self.response
 
 def main():
-    sender = RabbitMQSender()
+    test_data = load_test_data()
     
-    data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../test_data.json'))
-    with open(data_path, 'r') as f:
-        test_data = json.load(f)
-
     stats = MessageStats()
-    stats.start_time = get_current_time_ms()
-
+    stats.set_metadata({
+        'service': 'RabbitMQ',
+        'language': 'Python',
+        'async': False
+    })
+    start_time = get_current_time_ms()
+    
     print(f" [x] Starting transfer of {len(test_data)} messages...")
-
+    
+    # Connect to RabbitMQ
+    connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    channel = connection.channel()
+    
     for item in test_data:
+        message_id = extract_message_id(item)
         target = item.get('target', 0)
+        print(f" [x] Sending message {message_id} to target {target}...", end='', flush=True)
+        
+        queue_name = f"test_queue_{target}"
         msg_start = get_current_time_ms()
-        print(f" [x] Sending message {item['message_id']} to target {target}...", end='', flush=True)
         
-        response = sender.call(item)
+        # Declare reply queue
+        result = channel.queue_declare(queue='', exclusive=True)
+        callback_queue = result.method.queue
         
-        if response:
-            try:
-                resp_data = json.loads(response)
-                if resp_data.get('status') == 'ACK' and resp_data.get('message_id') == item['message_id']:
+        # Create and send protobuf message
+        envelope = create_data_envelope(item)
+        body = serialize_envelope(envelope)
+        
+        # Send message
+        channel.basic_publish(
+            exchange='',
+            routing_key=queue_name,
+            body=body,
+            properties=pika.BasicProperties(
+                reply_to=callback_queue,
+                correlation_id=message_id,
+                content_type='application/octet-stream'
+            )
+        )
+        
+        # Wait for reply with timeout
+        response_received = False
+        for method_frame, properties, reply_body in channel.consume(callback_queue, inactivity_timeout=0.04):
+            if method_frame:
+                # Got a response
+                resp_envelope = parse_envelope(reply_body)
+                if is_valid_ack(resp_envelope, message_id):
                     msg_duration = get_current_time_ms() - msg_start
                     stats.record_message(True, msg_duration)
                     print(" [OK]")
+                    response_received = True
                 else:
                     stats.record_message(False)
-                    print(f" [FAILED] Unexpected response: {response}")
-            except Exception as e:
-                stats.record_message(False)
-                print(f" [FAILED] Parse error: {e}")
-        else:
+                    print(" [FAILED] Invalid ACK")
+                    response_received = True
+                channel.cancel()
+                break
+            else:
+                # Timeout
+                channel.cancel()
+                break
+        
+        if not response_received:
             stats.record_message(False)
             print(" [FAILED] Timeout")
-
-    stats.end_time = get_current_time_ms()
+        
+        # Clean up reply queue
+        channel.queue_delete(queue=callback_queue)
     
-    report = {
-        "service": "RabbitMQ",
-        "language": "Python",
-        **stats.get_stats()
-    }
-
+    connection.close()
+    
+    end_time = get_current_time_ms()
+    stats.set_duration(start_time, end_time)
+    
+    report = stats.get_stats()
+    
     print("\nTest Results:")
-    for k, v in report.items():
-        if k != 'message_timing_stats':
-            print(f"{k}: {v}")
+    print(f"service: RabbitMQ")
+    print(f"language: Python")
+    print(f"total_sent: {stats.sent_count}")
+    print(f"total_received: {stats.received_count}")
+    print(f"duration_ms: {stats.get_duration_ms()}")
+    
+    with open('logs/report.txt', 'a') as f:
+        f.write(json.dumps(report) + '\n')
 
-    report_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../report.txt'))
-    with open(report_path, 'a') as f:
-        f.write(json.dumps(report) + "\n")
 
 if __name__ == "__main__":
     main()

@@ -1,90 +1,108 @@
 #!/usr/bin/env python3
-"""
-Redis Sender with targeted routing support for multi-receiver testing.
-Routes each message to test_queue_{target} based on the target field.
-"""
-import redis
-import json
-import uuid
+"""Redis Python Sender - Sync"""
 import sys
-import os
+import json
 import time
-import argparse
+import redis
+from pathlib import Path
 
-# Add harness to path for stats_collector
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../harness'))
-from stats_collector import MessageStats, get_current_time_ms
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
 
-class RedisSender:
-    def __init__(self):
-        self.r = redis.Redis(host='localhost', port=6379, db=0)
-        self.callback_queue = f"callback_{uuid.uuid4()}"
+from message_helpers import *
+from test_data_loader import load_test_data
+from stats_collector import MessageStats
 
-    def call(self, message_data):
-        target = message_data.get('target', 0)
-        queue_name = f"test_queue_{target}"
-        
-        message_data['reply_to'] = self.callback_queue
-        self.r.rpush(queue_name, json.dumps(message_data))
-        
-        # BLPOP with timeout for the response
-        response = self.r.blpop(self.callback_queue, timeout=0.2)
-        if response:
-            return response[1]
-        return None
 
 def main():
-    sender = RedisSender()
+    test_data = load_test_data()
     
-    data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../test_data.json'))
-    with open(data_path, 'r') as f:
-        test_data = json.load(f)
-
     stats = MessageStats()
-    stats.start_time = get_current_time_ms()
-
+    stats.set_metadata({
+        'service': 'Redis',
+        'language': 'Python',
+        'async': False
+    })
+    start_time = get_current_time_ms()
+    
     print(f" [x] Starting transfer of {len(test_data)} messages...")
-
+    
+    r = redis.Redis(host='localhost', port=6379, db=0)
+    pubsub = r.pubsub(ignore_subscribe_messages=True)
+    
     for item in test_data:
+        message_id = extract_message_id(item)
         target = item.get('target', 0)
+        print(f" [x] Sending message {message_id} to target {target}...", end='', flush=True)
+        
+        channel_name = f"test_channel_{target}"
+        reply_channel = f"reply_channel_{message_id}"
+        
         msg_start = get_current_time_ms()
-        print(f" [x] Sending message {item['message_id']} to target {target}...", end='', flush=True)
         
-        response = sender.call(item)
+        # Subscribe to reply channel
+        pubsub.subscribe(reply_channel)
         
-        if response:
-            try:
-                resp_data = json.loads(response)
-                if resp_data.get('status') == 'ACK' and resp_data.get('message_id') == item['message_id']:
-                    msg_duration = get_current_time_ms() - msg_start
-                    stats.record_message(True, msg_duration)
-                    print(" [OK]")
-                else:
-                    stats.record_message(False)
-                    print(f" [FAILED] Unexpected response: {response}")
-            except Exception as e:
-                stats.record_message(False)
-                print(f" [FAILED] Parse error: {e}")
-        else:
+        # Create and send protobuf message
+        envelope = create_data_envelope(item)
+        envelope.metadata['reply_to'] = reply_channel
+        body = serialize_envelope(envelope)
+        
+        # Publish with retry (handle potential race condition)
+        receivers = 0
+        for _ in range(3):
+            receivers = r.publish(channel_name, body)
+            if receivers > 0:
+                break
+            time.sleep(0.01)
+        
+        print(f" (reached {receivers} receivers)...", end='', flush=True)
+            
+        # Wait for reply
+        response_received = False
+        start_wait = time.time()
+        while (time.time() - start_wait) < 0.08:  # 80ms timeout
+            message = pubsub.get_message(timeout=0.01)
+            if message and message['type'] == 'message':
+                try:
+                    resp_envelope = parse_envelope(message['data'])
+                    if is_valid_ack(resp_envelope, message_id):
+                        msg_duration = get_current_time_ms() - msg_start
+                        stats.record_message(True, msg_duration)
+                        print(" [OK]")
+                        response_received = True
+                        break
+                    else:
+                        # Ignore mismatched ACKs (usually late ACKs from previous messages)
+                        continue
+                except Exception:
+                    continue
+        
+        if not response_received:
             stats.record_message(False)
             print(" [FAILED] Timeout")
-
-    stats.end_time = get_current_time_ms()
+            
+        pubsub.unsubscribe(reply_channel)
+        
+    pubsub.close()
+    r.close()
     
-    report = {
-        "service": "Redis",
-        "language": "Python",
-        **stats.get_stats()
-    }
-
+    end_time = get_current_time_ms()
+    stats.set_duration(start_time, end_time)
+    
+    report = stats.get_stats()
+    
     print("\nTest Results:")
-    for k, v in report.items():
-        if k != 'message_timing_stats':
-            print(f"{k}: {v}")
+    print(f"service: Redis")
+    print(f"language: Python")
+    print(f"total_sent: {stats.sent_count}")
+    print(f"total_received: {stats.received_count}")
+    print(f"duration_ms: {stats.get_duration_ms()}")
+    
+    with open('logs/report.txt', 'a') as f:
+        f.write(json.dumps(report) + '\n')
 
-    report_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../report.txt'))
-    with open(report_path, 'a') as f:
-        f.write(json.dumps(report) + "\n")
 
 if __name__ == "__main__":
     main()

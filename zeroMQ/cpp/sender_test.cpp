@@ -3,50 +3,33 @@
 #include <iostream>
 #include <fstream>
 #include <chrono>
+#include <thread>
 #include <map>
-#include "../../include/json.hpp"
-#include "../../include/stats_collector.hpp"
+#include "../../utils/cpp/stats_collector.hpp"
+#include "../../utils/cpp/test_data_loader.hpp"
+#include "../../utils/cpp/message_helpers.hpp"
 
 using json = nlohmann::json;
+using message_helpers::get_current_time_ms;
 
 int main() {
     zmq::context_t context(1);
-    
-    // Cache of sockets per target
     std::map<int, zmq::socket_t*> sockets;
 
-    std::string data_path = "test_data.json";
-    std::ifstream f(data_path);
-    if (!f.good()) {
-        data_path = "../../test_data.json";
-        f.close();
-        f.open(data_path);
-    }
-    if (!f.good()) {
-        data_path = "../../../test_data.json";
-        f.close();
-        f.open(data_path);
-    }
-    if (!f.good()) {
-        data_path = "/home/tim/repos/test_data.json";
-        f.close();
-        f.open(data_path);
-    }
-    
-    if (!f.good()) {
-        std::cerr << " [!] Could not find test_data.json" << std::endl;
-        return 1;
-    }
-    
-    json test_data = json::parse(f);
+    auto test_data = test_data_loader::loadTestData();
 
     MessageStats stats;
+    stats.set_metadata({
+        {"service", "ZeroMQ"},
+        {"language", "C++"},
+        {"async", false}
+    });
     long long start_time = get_current_time_ms();
-    stats.set_duration(start_time, 0);
 
     std::cout << " [x] Starting transfer of " << test_data.size() << " messages..." << std::endl;
 
     for (auto& item : test_data) {
+        std::string message_id = message_helpers::extract_message_id(item);
         int target = item.value("target", 0);
         int port = 5556 + target;
 
@@ -54,51 +37,45 @@ int main() {
         if (sockets.find(target) == sockets.end()) {
             zmq::socket_t* sock = new zmq::socket_t(context, ZMQ_REQ);
             sock->connect("tcp://localhost:" + std::to_string(port));
-            sock->setsockopt(ZMQ_RCVTIMEO, 500);  // 500ms timeout (async receiver responsiveness)
+            sock->setsockopt(ZMQ_RCVTIMEO, 40);  // 40ms timeout
             sockets[target] = sock;
+            
+            // Small delay to allow ZeroMQ connection to establish
+            // (connect() is async and returns immediately)
+            // Async receivers need slightly more time
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         
         zmq::socket_t* socket = sockets[target];
-        std::string message_id = item["message_id"].is_string() ? item["message_id"].get<std::string>() : std::to_string(item["message_id"].get<long long>());
-
-        std::cout << " [x] Sending message " << message_id << " to target " << target 
-                  << " (port " << port << ")..." << std::flush;
+        std::cout << " [x] Sending message " << message_id << " to port " << port << "..." << std::flush;
         
         long long msg_start = get_current_time_ms();
         try {
-            std::string request_str = item.dump();
+            // Create and send protobuf message
+            MessageEnvelope envelope = message_helpers::create_data_envelope(item);
+            std::string body = message_helpers::serialize_envelope(envelope);
             
-            zmq::message_t request(request_str.size());
-            memcpy(request.data(), request_str.c_str(), request_str.size());
+            zmq::message_t request(body.size());
+            memcpy(request.data(), body.c_str(), body.size());
             socket->send(request, zmq::send_flags::none);
 
+            // Receive ACK
             zmq::message_t reply;
             auto recv_res = socket->recv(reply);
             
             if (recv_res.has_value()) {
                 std::string reply_str(static_cast<char*>(reply.data()), reply.size());
                 
-                if (reply_str.empty()) {
+                // Parse and validate ACK
+                MessageEnvelope resp_envelope;
+                if (message_helpers::parse_envelope(reply_str, resp_envelope) && 
+                    message_helpers::is_valid_ack(resp_envelope, message_id)) {
+                    long long msg_duration = get_current_time_ms() - msg_start;
+                    stats.record_message(true, msg_duration);
+                    std::cout << " [OK]" << std::endl;
+                } else {
                     stats.record_message(false);
-                    std::cout << " [FAILED] Received empty reply" << std::endl;
-                    continue;
-                }
-
-                try {
-                    json resp_data = json::parse(reply_str);
-                    auto resp_msg_id = resp_data["message_id"].is_string() ? resp_data["message_id"].get<std::string>() : std::to_string(resp_data["message_id"].get<long long>());
-
-                    if (resp_data["status"] == "ACK" && resp_msg_id == message_id) {
-                        long long msg_duration = get_current_time_ms() - msg_start;
-                        stats.record_message(true, msg_duration);
-                        std::cout << " [OK]" << std::endl;
-                    } else {
-                        stats.record_message(false);
-                        std::cout << " [FAILED] Unexpected response: " << reply_str << std::endl;
-                    }
-                } catch (const std::exception& e) {
-                    stats.record_message(false);
-                    std::cout << " [FAILED] JSON parse error: " << e.what() << " on data: '" << reply_str << "'" << std::endl;
+                    std::cout << " [FAILED] Invalid ACK" << std::endl;
                 }
             } else {
                 stats.record_message(false);
@@ -112,7 +89,6 @@ int main() {
         } catch (const std::exception& e) {
             stats.record_message(false);
             std::cout << " [FAILED] Error: " << e.what() << std::endl;
-            // Close poisoned REQ socket on any error
             socket->close();
             delete socket;
             sockets.erase(target);
@@ -123,8 +99,6 @@ int main() {
     stats.set_duration(start_time, end_time);
     
     json report = stats.get_stats();
-    report["service"] = "ZeroMQ";
-    report["language"] = "C++";
 
     std::cout << "\nTest Results:" << std::endl;
     std::cout << "service: ZeroMQ" << std::endl;
@@ -132,16 +106,11 @@ int main() {
     std::cout << "total_sent: " << stats.sent_count << std::endl;
     std::cout << "total_received: " << stats.received_count << std::endl;
     std::cout << "duration_ms: " << stats.get_duration_ms() << std::endl;
-    if (report.contains("message_timing_stats")) {
-        std::cout << "message_timing_stats: " << report["message_timing_stats"].dump() << std::endl;
-    }
 
-    std::ofstream rf("report.txt", std::ios::app);
+    std::ofstream rf("logs/report.txt", std::ios::app);
     if (rf.good()) {
         rf << report.dump() << std::endl;
         rf.close();
-    } else {
-        std::cerr << " [!] Warning: Could not write to report file" << std::endl;
     }
 
     // Cleanup

@@ -1,75 +1,101 @@
 #!/usr/bin/env python3
-"""
-NATS Async Sender with targeted routing.
-Sends messages concurrently using asyncio.gather.
-"""
-import asyncio
-from nats.aio.client import Client as NATS
-import json
+"""NATS Python Sender - Async"""
 import sys
-import os
-import time
+import json
+import nats
+import asyncio
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
-# Add harness to path for stats_collector
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../harness'))
-from stats_collector import MessageStats, get_current_time_ms
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
 
-async def send_message(nc, item, stats):
-    target = item.get('target', 0)
-    subject = f"test.receiver.{target}"
-    msg_start = get_current_time_ms()
+from message_helpers import *
+from test_data_loader import load_test_data
+from stats_collector import MessageStats
+
+
+async def send_message_task(nc, item):
+    """Send a single message asynchronously."""
+    result = {'success': False, 'message_id': '', 'duration': 0, 'error': ''}
     
-    print(f" [x] [ASYNC] Sending message {item['message_id']} to target {target}...")
     try:
-        response = await nc.request(subject, json.dumps(item).encode(), timeout=0.2)
-        resp_data = json.loads(response.data.decode())
+        message_id = extract_message_id(item)
+        result['message_id'] = message_id
+        target = item.get('target', 0)
         
-        if resp_data.get('status') == 'ACK' and resp_data.get('message_id') == item['message_id']:
-            msg_duration = get_current_time_ms() - msg_start
-            stats.record_message(True, msg_duration)
-            print(f" [OK] Message {item['message_id']} acknowledged")
+        subject = f"test.subject.{target}"
+        msg_start = get_current_time_ms()
+        
+        # Create and send message
+        envelope = create_data_envelope(item)
+        body = serialize_envelope(envelope)
+        
+        response = await nc.request(subject, body, timeout=0.1)  # 100ms
+        
+        # Parse and validate ACK
+        resp_envelope = parse_envelope(response.data)
+        if is_valid_ack(resp_envelope, message_id):
+            result['duration'] = get_current_time_ms() - msg_start
+            result['success'] = True
+        else:
+            result['error'] = 'Invalid ACK'
+    except asyncio.TimeoutError:
+        result['error'] = 'Timeout'
+    except Exception as e:
+        result['error'] = str(e)
+    
+    return result
+
+
+async def run():
+    test_data = load_test_data()
+    
+    stats = MessageStats()
+    stats.set_metadata({
+        'service': 'NATS',
+        'language': 'Python',
+        'async': True
+    })
+    start_time = get_current_time_ms()
+    
+    print(f" [x] Starting ASYNC transfer of {len(test_data)} messages...")
+    
+    nc = await nats.connect("nats://localhost:4222")
+    
+    # Send all messages concurrently
+    tasks = [send_message_task(nc, item) for item in test_data]
+    results = await asyncio.gather(*tasks)
+    
+    # Process results
+    for result in results:
+        if result['success']:
+            stats.record_message(True, result['duration'])
+            print(f" [OK] Message {result['message_id']} acknowledged")
         else:
             stats.record_message(False)
-            print(f" [FAILED] Unexpected response for {item['message_id']}: {response.data.decode()}")
-    except Exception as e:
-        stats.record_message(False)
-        print(f" [FAILED] Error for message {item['message_id']}: {e}")
-
-async def main():
-    nc = NATS()
-    await nc.connect(servers=["nats://localhost:4222"])
-
-    data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../test_data.json'))
-    with open(data_path, 'r') as f:
-        test_data = json.load(f)
-
-    stats = MessageStats()
-    stats.start_time = get_current_time_ms()
-
-    print(f" [x] Starting transfer of {len(test_data)} messages (ASYNC)...")
-
-    tasks = [send_message(nc, item, stats) for item in test_data]
-    await asyncio.gather(*tasks)
-
-    stats.end_time = get_current_time_ms()
+            print(f" [FAILED] Message {result['message_id']}: {result['error']}")
     
-    report = {
-        "service": "NATS",
-        "language": "Python",
-        "async": True,
-        **stats.get_stats()
-    }
-
-    print("\nTest Results (ASYNC):")
-    for k, v in report.items():
-        if k != 'message_timing_stats':
-            print(f"{k}: {v}")
-
-    report_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../report.txt'))
-    with open(report_path, 'a') as f:
-        f.write(json.dumps(report) + "\n")
-
     await nc.close()
+    
+    end_time = get_current_time_ms()
+    stats.set_duration(start_time, end_time)
+    
+    report = stats.get_stats()
+    
+    print("\nTest Results (ASYNC):")
+    print(f"total_sent: {stats.sent_count}")
+    print(f"total_received: {stats.received_count}")
+    print(f"duration_ms: {stats.get_duration_ms()}")
+    
+    with open('logs/report.txt', 'a') as f:
+        f.write(json.dumps(report) + '\n')
+
+
+def main():
+    asyncio.run(run())
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

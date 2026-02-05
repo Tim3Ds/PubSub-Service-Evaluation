@@ -1,122 +1,121 @@
 #!/usr/bin/env python3
-"""
-ActiveMQ Sender with targeted routing support for multi-receiver testing.
-Routes each message to /queue/test_request_{target} based on the target field.
-"""
-import stomp
-import json
+"""ActiveMQ Python Sender - Sync"""
 import sys
-import os
+import json
 import time
-import uuid
+import stomp
+from pathlib import Path
 
-# Add harness to path for stats_collector
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../harness'))
-from stats_collector import MessageStats, get_current_time_ms
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
 
-class ActiveMQSender(stomp.ConnectionListener):
-    def __init__(self, host='localhost', port=61613):
-        self.conn = stomp.Connection(host_and_ports=[(host, port)])
-        self.conn.set_listener('sender', self)
+from message_helpers import *
+from test_data_loader import load_test_data
+from stats_collector import MessageStats
+
+
+class ReplyListener(stomp.ConnectionListener):
+    def __init__(self):
+        self.responses = {}
         
-        # Connection retry loop
-        retries = 10
-        connected = False
-        while not connected and retries > 0:
-            try:
-                self.conn.connect(wait=True)
-                connected = True
-            except stomp.exception.ConnectFailedException:
-                retries -= 1
-                if retries > 0:
-                    print(f" [!] Connection failed, retrying in 5 seconds... ({retries} retries left)")
-                    time.sleep(5)
-                else:
-                    raise
-        
-        self.reply_queue = f'/queue/reply.{uuid.uuid4()}'
-        self.conn.subscribe(destination=self.reply_queue, id=1, ack='auto')
-        self.response = None
-        self.corr_id = None
-
     def on_message(self, frame):
-        if frame.headers.get('correlation-id') == self.corr_id:
-            self.response = frame.body
+        if 'correlation-id' in frame.headers:
+            corr_id = frame.headers['correlation-id']
+            self.responses[corr_id] = frame.body
 
-    def send_and_wait(self, message_data):
-        self.response = None
-        self.corr_id = str(uuid.uuid4())
-        target = message_data.get('target', 0)
-        destination = f'/queue/test_queue_{target}'
-        
-        self.conn.send(
-            destination=destination,
-            body=json.dumps(message_data),
-            headers={
-                'reply-to': self.reply_queue,
-                'correlation-id': self.corr_id
-            }
-        )
-        
-        start_wait = time.time()
-        while self.response is None and (time.time() - start_wait) < 0.04:
-            time.sleep(0.01)
-        return self.response
 
 def main():
-    sender = ActiveMQSender()
+    test_data = load_test_data()
     
-    data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../test_data.json'))
-    with open(data_path, 'r') as f:
-        test_data = json.load(f)
-
     stats = MessageStats()
-    stats.start_time = get_current_time_ms()
-
+    stats.set_metadata({
+        'service': 'ActiveMQ',
+        'language': 'Python',
+        'async': False
+    })
+    start_time = get_current_time_ms()
+    
     print(f" [x] Starting transfer of {len(test_data)} messages...")
-
+    
+    conn = stomp.Connection([('localhost', 61613)], auto_decode=False)
+    listener = ReplyListener()
+    conn.set_listener('', listener)
+    conn.connect('admin', 'admin', wait=True)
+    
+    # Subscribe to temporary reply queue
+    reply_dest = '/temp-queue/replies'
+    conn.subscribe(destination=reply_dest, id=1, ack='auto')
+    
     for item in test_data:
+        message_id = extract_message_id(item)
         target = item.get('target', 0)
+        print(f" [x] Sending message {message_id} to target {target}...", end='', flush=True)
+        
+        dest = f"/queue/test_queue_{target}"
         msg_start = get_current_time_ms()
-        print(f" [x] Sending message {item['message_id']} to target {target}...", end='', flush=True)
         
-        response = sender.send_and_wait(item)
+        # Create and send protobuf message
+        envelope = create_data_envelope(item)
+        body = serialize_envelope(envelope)
         
-        if response:
-            try:
-                resp_data = json.loads(response)
-                if resp_data.get('status') == 'ACK' and resp_data.get('message_id') == item['message_id']:
+        # Clear previous response
+        corr_id = f"corr-{message_id}"
+        if corr_id in listener.responses:
+            del listener.responses[corr_id]
+            
+        conn.send(body=body, destination=dest, headers={
+            'reply-to': reply_dest,
+            'correlation-id': corr_id,
+            'content-type': 'application/octet-stream'
+        })
+        
+        # Wait for reply
+        response_received = False
+        start_wait = time.time()
+        while (time.time() - start_wait) < 0.1:  # 100ms timeout for STOMP
+            if corr_id in listener.responses:
+                # Got response
+                # Stomp body comes as string/bytes depending on impl, may need encoding handling
+                # Assuming stomp.py handles bytes correctly or we encode
+                resp_data = listener.responses[corr_id]
+                if isinstance(resp_data, str):
+                    resp_data = resp_data.encode('latin-1')  # latin-1 preserves bytes 0-255
+                    
+                resp_envelope = parse_envelope(resp_data)
+                if is_valid_ack(resp_envelope, message_id):
                     msg_duration = get_current_time_ms() - msg_start
                     stats.record_message(True, msg_duration)
                     print(" [OK]")
+                    response_received = True
                 else:
                     stats.record_message(False)
-                    print(f" [FAILED] Unexpected response: {response}")
-            except Exception as e:
-                stats.record_message(False)
-                print(f" [FAILED] Parse error: {e}")
-        else:
+                    print(" [FAILED] Invalid ACK")
+                    response_received = True
+                break
+            time.sleep(0.001)
+        
+        if not response_received:
             stats.record_message(False)
             print(" [FAILED] Timeout")
-
-    stats.end_time = get_current_time_ms()
+            
+    conn.disconnect()
     
-    report = {
-        "service": "ActiveMQ",
-        "language": "Python",
-        **stats.get_stats()
-    }
-
+    end_time = get_current_time_ms()
+    stats.set_duration(start_time, end_time)
+    
+    report = stats.get_stats()
+    
     print("\nTest Results:")
-    for k, v in report.items():
-        if k != 'message_timing_stats':
-            print(f"{k}: {v}")
+    print(f"service: ActiveMQ")
+    print(f"language: Python")
+    print(f"total_sent: {stats.sent_count}")
+    print(f"total_received: {stats.received_count}")
+    print(f"duration_ms: {stats.get_duration_ms()}")
+    
+    with open('logs/report.txt', 'a') as f:
+        f.write(json.dumps(report) + '\n')
 
-    report_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../report.txt'))
-    with open(report_path, 'a') as f:
-        f.write(json.dumps(report) + "\n")
-
-    sender.conn.disconnect()
 
 if __name__ == "__main__":
     main()

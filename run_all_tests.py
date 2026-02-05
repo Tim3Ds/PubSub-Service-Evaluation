@@ -18,21 +18,23 @@ class Logger:
         self.terminal.flush()
         self.log.flush()
 
-def run_test(service, sender, py_receivers, cpp_receivers, report_file, logger, async_sender=False, async_receiver=False):
+def run_test(service, sender, py_receivers, cpp_receivers, report_file, logger, async_sender=False, async_receiver=False, num_messages=1000):
     mode_str = f"S:{'A' if async_sender else 'N'}/R:{'A' if async_receiver else 'N'}"
     print(f"[-] Running {service} {sender} ({mode_str}) -> {py_receivers} Py / {cpp_receivers} C++...")
     cmd = [
-        "python3", "-u", "harness/test_harness.py",
+        "python3", "-u", "test_harness.py",
         "--service", service,
         "--sender", sender,
         "--py-receivers", str(py_receivers),
         "--cpp-receivers", str(cpp_receivers),
-        "--report", report_file
+        "--report", report_file,
+        "--messages", str(num_messages)
     ]
     if async_sender:
         cmd.append("--async-sender")
     if async_receiver:
         cmd.append("--async-receiver")
+    
     try:
         # Capture stdout/stderr and print/log in real-time if possible, 
         # or just let it write to sys.stdout which is now our Logger
@@ -52,15 +54,19 @@ def run_test(service, sender, py_receivers, cpp_receivers, report_file, logger, 
             print(f"[!] Test failed with exit code {rc}\n")
             
     except Exception as e:
+        print(f" [!] Error running test: {e}")
         print(f"[!] Test failed with exception: {e}\n")
 
 def main():
     parser = argparse.ArgumentParser(description="Run messaging service tests")
     parser.add_argument("--service", type=str, help="Run tests for a specific service (e.g., zeromq, grpc, redis, rabbitmq, nats, activemq)")
     parser.add_argument("--all", action="store_true", help="Run all services (default behavior)")
+    parser.add_argument("--messages", type=int, default=35, help="Number of messages to generate")
+    parser.add_argument("--receivers", type=int, default=32, help="Number of receivers to generate data for")
     args = parser.parse_args()
     
     all_services = ['grpc', 'zeromq', 'redis', 'rabbitmq', 'nats', 'activemq']
+    default_services = ['grpc', 'zeromq', 'redis', 'rabbitmq', 'nats']  # ActiveMQ excluded due to C++ async freeze issue
     
     # Determine which services to run
     if args.service:
@@ -70,11 +76,11 @@ def main():
             sys.exit(1)
         services = [args.service]
     else:
-        services = all_services
+        services = default_services
     
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    report_file = f"report{timestamp}.json"
-    log_file = f"run_log_{timestamp}.txt"
+    report_file = f"logs/report{timestamp}_m{args.messages}.json"
+    log_file = f"logs/run_log_{timestamp}_m{args.messages}.txt"
     
     # Redirect stdout to Logger
     sys.stdout = Logger(log_file)
@@ -83,15 +89,13 @@ def main():
     print(f"Log will be written to {log_file}")
     print(f"Services to test: {', '.join(services)}")
 
+    print(f"Generating data for {args.messages} messages and {args.receivers} receivers...")
+    subprocess.run(["python3", "generate_data.py", "--messages", str(args.messages), "--receivers", str(args.receivers)], check=True)
+
     spreads = [
-        # (32, 0),
-        # (31, 1),
-        # (24, 8),
-        # (20, 12),
-        (16, 16),
-        # (8, 24),
-        # (1, 31),
-        # (0, 32)
+        (args.receivers, 0),
+        (args.receivers // 2, args.receivers - (args.receivers // 2)),
+        (0, args.receivers)
     ]
 
     scenarios = []
@@ -109,7 +113,7 @@ def main():
 
     for i, (service, sender, py, cpp, async_s, async_r) in enumerate(scenarios):
         print(f"Scenario {i+1}/{count}")
-        run_test(service, sender, py, cpp, report_file, sys.stdout, async_s, async_r)
+        run_test(service, sender, py, cpp, report_file, sys.stdout, async_s, async_r, args.messages)
         # Small cooldown to ensure ports allow release if needed
         time.sleep(1) 
 

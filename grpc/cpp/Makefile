@@ -2,6 +2,7 @@
 
 BUILD_DIR = $(CURDIR)/build
 DEPS_DIR = $(BUILD_DIR)/deps
+PROTOBUF_DIR = $(CURDIR)/../../utils/protobuf/build
 PROTOBUF_VERSION = 3.21.12
 GRPC_VERSION = v1.54.0
 
@@ -31,8 +32,8 @@ protobuf:
 		cmake --install build; \
 	fi
 
-# Build gRPC from source (includes protobuf)
-grpc: protobuf
+# Build gRPC from source (linking against centralized protobuf)
+grpc:
 	@if [ -f "$(DEPS_DIR)/lib/libgrpc++.a" ] || [ -f "$(DEPS_DIR)/lib64/libgrpc++.a" ]; then \
 		echo "gRPC already built in $(DEPS_DIR)"; \
 	else \
@@ -46,22 +47,24 @@ grpc: protobuf
 		git submodule update --init --recursive && \
 		cmake -B build \
 			-DCMAKE_INSTALL_PREFIX=$(DEPS_DIR) \
-			-DCMAKE_PREFIX_PATH=$(DEPS_DIR) \
+			-DCMAKE_PREFIX_PATH="$(DEPS_DIR);$(PROTOBUF_DIR)" \
 			-DgRPC_INSTALL=ON \
 			-DgRPC_BUILD_TESTS=OFF \
 			-DgRPC_PROTOBUF_PROVIDER=package \
-			-DgRPC_SSL_PROVIDER=package && \
+			-DgRPC_SSL_PROVIDER=package \
+			-DProtobuf_DIR=$(PROTOBUF_DIR)/lib/cmake/protobuf && \
 		cmake --build build -j$$(nproc) && \
 		cmake --install build; \
 	fi
 
 deps: grpc
 
-# Build the project using locally built dependencies
+# Build the project using locally built dependencies and centralized protobuf
 build: deps
 	cmake -S . -B $(BUILD_DIR) \
-		-DCMAKE_PREFIX_PATH=$(DEPS_DIR) \
+		-DCMAKE_PREFIX_PATH="$(DEPS_DIR);$(PROTOBUF_DIR)" \
 		-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=$(BUILD_DIR)/bin
+	cmake --build $(BUILD_DIR)
 	cmake --build $(BUILD_DIR)
 
 clean:

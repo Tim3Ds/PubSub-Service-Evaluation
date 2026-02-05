@@ -1,81 +1,99 @@
-"""
-gRPC Sender with targeted routing support for multi-receiver testing.
-Routes each message to localhost:5005{target} based on the target field.
-"""
-import grpc
-import test_data_pb2
-import test_data_pb2_grpc
-import json
+#!/usr/bin/env python3
+"""gRPC Python Sender - Sync"""
 import sys
-import os
+import json
+import grpc
 import time
+from pathlib import Path
 
-# Add harness to path for stats_collector
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../harness'))
-from stats_collector import MessageStats, get_current_time_ms
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
+
+# Import generated protobuf code
+import messaging_pb2
+import messaging_pb2_grpc
+from message_helpers import *
+from test_data_loader import load_test_data
+from stats_collector import MessageStats
+
 
 def main():
-    data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../test_data.json'))
-    with open(data_path, 'r') as f:
-        test_data = json.load(f)
-
-    # Create channels for all 32 receivers (ports 50051-50082)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--base-port', type=int, default=50051)
+    parser.add_argument('--num-receivers', type=int, default=1)
+    args = parser.parse_args()
+    
+    test_data = load_test_data()
+    
+    stats = MessageStats()
+    stats.set_metadata({
+        'service': 'gRPC',
+        'language': 'Python',
+        'async': False
+    })
+    start_time = get_current_time_ms()
+    
+    print(f" [x] Starting transfer of {len(test_data)} messages...")
+    
+    # Cache channels
     channels = {}
     stubs = {}
-    for i in range(32):
-        port = 50051 + i
-        channels[i] = grpc.insecure_channel(f'localhost:{port}')
-        stubs[i] = test_data_pb2_grpc.TestDataServiceStub(channels[i])
-
-    stats = MessageStats()
-    stats.start_time = get_current_time_ms()
-
-    print(f" [x] Starting transfer of {len(test_data)} messages...")
-
+    
     for item in test_data:
+        message_id = extract_message_id(item)
         target = item.get('target', 0)
+        port = args.base_port + target
+        
+        if target not in stubs:
+             channel = grpc.insecure_channel(f'localhost:{port}')
+             stub = messaging_pb2_grpc.MessagingServiceStub(channel)
+             channels[target] = channel
+             stubs[target] = stub
+        
+        stub = stubs[target]
+        print(f" [x] Sending message {message_id} to target {target}...", end='', flush=True)
         msg_start = get_current_time_ms()
-        print(f" [x] Sending message {item['message_id']} to target {target}...", end='', flush=True)
+        
+        # Create protobuf message directly/using helper
+        envelope = create_data_envelope(item)
+        
         try:
-            request = test_data_pb2.TestDataItem(
-                message_id=item['message_id'],
-                message_name=item['message_name'],
-                message_value=item['message_value'],
-                target=target
-            )
-            response = stubs[target].TransferData(request, timeout=0.04)
+            # gRPC expects the protobuf object, not serialized bytes
+            response = stub.SendMessage(envelope)
             
-            if response.status == 'ACK' and response.message_id == item['message_id']:
+            if is_valid_ack(response, message_id):
                 msg_duration = get_current_time_ms() - msg_start
                 stats.record_message(True, msg_duration)
                 print(" [OK]")
             else:
                 stats.record_message(False)
-                print(f" [FAILED] Unexpected response: {response.status}")
-        except Exception as e:
+                print(" [FAILED] Invalid ACK")
+                
+        except grpc.RpcError as e:
             stats.record_message(False)
-            print(f" [FAILED] Error: {e}")
-
-    stats.end_time = get_current_time_ms()
+            print(f" [FAILED] RPC Error: {e.code()}")
+            
+    # Cleanup
+    for channel in channels.values():
+        channel.close()
     
-    report = {
-        "service": "gRPC",
-        "language": "Python",
-        **stats.get_stats()
-    }
-
+    end_time = get_current_time_ms()
+    stats.set_duration(start_time, end_time)
+    
+    report = stats.get_stats()
+    
     print("\nTest Results:")
-    for k, v in report.items():
-        if k != 'message_timing_stats':
-            print(f"{k}: {v}")
+    print(f"service: gRPC")
+    print(f"language: Python")
+    print(f"total_sent: {stats.sent_count}")
+    print(f"total_received: {stats.received_count}")
+    print(f"duration_ms: {stats.get_duration_ms()}")
+    
+    with open('logs/report.txt', 'a') as f:
+        f.write(json.dumps(report) + '\n')
 
-    report_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../report.txt'))
-    with open(report_path, 'a') as f:
-        f.write(json.dumps(report) + "\n")
-
-    # Close channels
-    for ch in channels.values():
-        ch.close()
 
 if __name__ == "__main__":
     main()

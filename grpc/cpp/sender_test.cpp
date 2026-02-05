@@ -3,144 +3,110 @@
 #include <string>
 #include <vector>
 #include <memory>
-#include <algorithm>
-#include <cmath>
 #include <grpcpp/grpcpp.h>
-#include "test_data.grpc.pb.h"
-#include "../../include/json.hpp"
-#include "../../include/stats_collector.hpp"
+#include "messaging.grpc.pb.h"
+#include "../../utils/cpp/stats_collector.hpp"
+#include "../../utils/cpp/test_data_loader.hpp"
+#include "../../utils/cpp/message_helpers.hpp"
 
 using grpc::Channel;
 using grpc::ClientContext;
 using grpc::Status;
-using test_data::TestDataItem;
-using test_data::Ack;
-using test_data::TestDataService;
+using messaging::MessageEnvelope;
+using messaging::MessagingService;
 using json = nlohmann::json;
+using message_helpers::get_current_time_ms;
 
-class TestDataClient {
+class MessageClient {
+private:
+    std::vector<std::unique_ptr<MessagingService::Stub>> stubs_;
+    
 public:
-    TestDataClient() {
-        // Create channels for all 32 receivers
-        for (int i = 0; i < 32; ++i) {
-            std::string address = "localhost:" + std::to_string(50051 + i);
-            stubs_.push_back(TestDataService::NewStub(grpc::CreateChannel(address, grpc::InsecureChannelCredentials())));
+    MessageClient(int num_receivers) {
+        for (int i = 0; i < num_receivers; i++) {
+            int port = 50051 + i;
+            auto channel = grpc::CreateChannel("localhost:" + std::to_string(port), grpc::InsecureChannelCredentials());
+            stubs_.push_back(MessagingService::NewStub(channel));
         }
     }
-
-    bool TransferData(const json& item) {
-        TestDataItem request;
-        request.set_message_id(item["message_id"]);
-        request.set_message_name(item["message_name"]);
-        for (const auto& val : item["message_value"]) {
-            request.add_message_value(val);
-        }
+    
+    bool SendMessage(const json& item) {
+        std::string message_id = message_helpers::extract_message_id(item);
+        int target = item.value("target", 0);
         
-        int target = 0;
-        if (item.contains("target")) {
-            target = item["target"];
-        }
-        request.set_target(target);
+        // Create protobuf message with DataMessage payload
+        MessageEnvelope request = message_helpers::create_data_envelope(item);
 
-        // Ensure target is within range
-        if (target < 0 || target >= 32) {
-             std::cout << " [FAILED] Invalid target: " << target << std::endl;
-             return false;
-        }
-
-        Ack reply;
+        MessageEnvelope reply;
         ClientContext context;
         context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(40));
 
-        Status status = stubs_[target]->TransferData(&context, request, &reply);
+        Status status = stubs_[target]->SendMessage(&context, request, &reply);
 
         if (status.ok()) {
-            return reply.status() == "ACK" && reply.message_id() == item["message_id"];
+            return message_helpers::is_valid_ack(reply, message_id);
         } else {
-            std::cout << " [FAILED] gRPC error sending to target " << target << ": " << status.error_message() << std::endl;
+            std::cout << " [FAILED] gRPC error: " << status.error_message() << std::endl;
             return false;
         }
     }
-
-private:
-    std::vector<std::unique_ptr<TestDataService::Stub>> stubs_;
 };
 
 int main() {
-    try {
-        std::string data_path = "test_data.json";
-        std::ifstream f(data_path);
-        if (!f.good()) {
-            data_path = "../../test_data.json";
-            f.close();
-            f.open(data_path);
+    auto test_data = test_data_loader::loadTestData();
+    
+    // Find max target to create all necessary stubs
+    int max_target = 0;
+    for (const auto& item : test_data) {
+        if (item.contains("target")) {
+            max_target = std::max(max_target, item["target"].get<int>());
         }
-        if (!f.good()) {
-            data_path = "/home/tim/repos/test_data.json";
-            f.close();
-            f.open(data_path);
-        }
-        
-        if (!f.good()) {
-             throw std::runtime_error("Could not find test_data.json");
-        }
-        
-        json test_data = json::parse(f);
-
-        TestDataClient client;
-        std::cout << " [x] Starting transfer of " << test_data.size() << " messages..." << std::endl;
-
-        MessageStats stats;
-        stats.set_duration(get_current_time_ms(), 0);
-        long long start_time = get_current_time_ms();
-
-        for (auto& item : test_data) {
-            int target = 0;
-            if (item.contains("target")) target = item["target"];
-            
-            std::cout << " [x] Sending message " << item["message_id"] << " to target " << target << "..." << std::flush;
-            
-            long long msg_start = get_current_time_ms();
-            if (client.TransferData(item)) {
-                std::cout << " [OK]" << std::endl;
-                long long msg_duration = get_current_time_ms() - msg_start;
-                stats.record_message(true, msg_duration);
-            } else {
-                stats.record_message(false);
-            }
-        }
-        
-        long long end_time = get_current_time_ms();
-        stats.set_duration(start_time, end_time);
-
-        // Generate complete report
-        json report = stats.get_stats();
-        report["service"] = "gRPC";
-        report["language"] = "C++";
-
-        std::cout << "\nTest Results:" << std::endl;
-        std::cout << "service: gRPC" << std::endl;
-        std::cout << "language: C++" << std::endl;
-        std::cout << "total_sent: " << stats.sent_count << std::endl;
-        std::cout << "total_received: " << stats.received_count << std::endl;
-        std::cout << "duration_ms: " << stats.get_duration_ms() << std::endl;
-        
-        if (report.contains("message_timing_stats")) {
-            std::cout << "message_timing_stats: " << report["message_timing_stats"].dump() << std::endl;
-        }
-
-        std::ofstream report_file("report.txt", std::ios_base::app);
-        if (report_file.good()) {
-            report_file << report.dump() << std::endl;
-            report_file.close();
-        } else {
-            std::cerr << " [!] Warning: Could not write to report file" << std::endl;
-        }
-
-    } catch (const std::exception& e) {
-        std::cerr << " [!] Error: " << e.what() << std::endl;
-        return 1;
     }
-
+    
+    MessageClient client(max_target + 1);
+    MessageStats stats;
+    stats.set_metadata({
+        {"service", "gRPC"},
+        {"language", "C++"},
+        {"async", false}
+    });
+    long long start_time = get_current_time_ms();
+    
+    std::cout << " [x] Starting transfer of " << test_data.size() << " messages..." << std::endl;
+    
+    for (auto& item : test_data) {
+        std::string message_id = message_helpers::extract_message_id(item);
+        int target = item.value("target", 0);
+        std::cout << " [x] Sending message " << message_id << " to target " << target << "..." << std::flush;
+        
+        long long msg_start = get_current_time_ms();
+        if (client.SendMessage(item)) {
+            long long msg_duration = get_current_time_ms() - msg_start;
+            stats.record_message(true, msg_duration);
+            std::cout << " [OK]" << std::endl;
+        } else {
+            stats.record_message(false);
+            std::cout << " [FAILED]" << std::endl;
+        }
+    }
+    
+    long long end_time = get_current_time_ms();
+    stats.set_duration(start_time, end_time);
+    
+    json report = stats.get_stats();
+    
+    std::cout << "\nTest Results:" << std::endl;
+    std::cout << "service: gRPC" << std::endl;
+    std::cout << "language: C++" << std::endl;
+    std::cout << "total_sent: " << stats.sent_count << std::endl;
+    std::cout << "total_received: " << stats.received_count << std::endl;
+    std::cout << "duration_ms: " << stats.get_duration_ms() << std::endl;
+    
+    std::ofstream rf("logs/report.txt", std::ios::app);
+    if (rf.good()) {
+        rf << report.dump() << std::endl;
+        rf.close();
+    }
+    
     return 0;
 }

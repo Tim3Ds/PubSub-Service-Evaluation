@@ -1,76 +1,68 @@
 #!/usr/bin/env python3
-"""
-Redis Async Receiver.
-Uses redis-py async support to handle requests.
-"""
+"""Redis Python Receiver - Async"""
+import sys
+import signal
 import asyncio
 import redis.asyncio as redis
-import json
-import argparse
-import signal
-import sys
+from pathlib import Path
 
-class RedisAsyncReceiver:
-    def __init__(self, receiver_id):
-        self.receiver_id = receiver_id
-        self.queue_name = f"test_queue_{receiver_id}"
-        self.messages_received = 0
-        self.r = redis.Redis(host='localhost', port=6379, db=0)
-        self.running = True
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
 
-    async def run(self):
-        print(f" [*] [ASYNC] Receiver {self.receiver_id} awaiting messages on {self.queue_name}")
+from message_helpers import *
 
-        while self.running:
-            try:
-                # BLPOP returns (queue_name, data)
-                response = await self.r.blpop(self.queue_name, timeout=1)
-                if response:
-                    self.messages_received += 1
-                    data = json.loads(response[1])
-                    message_id = data.get('message_id')
-                    reply_to = data.get('reply_to')
-                    
-                    print(f" [Receiver {self.receiver_id}] [ASYNC] Received message {message_id}")
-                    
-                    ack_data = json.dumps({
-                        "status": "ACK",
-                        "message_id": message_id,
-                        "receiver_id": self.receiver_id,
-                        "async": True
-                    })
-                    
-                    if reply_to:
-                        await self.r.rpush(reply_to, ack_data)
-            except Exception as e:
-                if self.running:
-                    print(f" [!] [ASYNC] Error processing message: {e}")
+running = True
 
-async def shutdown(receiver):
-    print(f" [x] [ASYNC] Shutdown requested for Redis receiver {receiver.receiver_id} (received {receiver.messages_received} messages)")
-    receiver.running = False
-    await receiver.r.aclose()
-    sys.exit(0)
+def signal_handler(sig, frame):
+    global running
+    running = False
 
-async def main():
-    parser = argparse.ArgumentParser(description='Redis Async Receiver')
-    parser.add_argument('--id', type=int, default=0, help='Receiver ID (0-31)')
+async def run(receiver_id):
+    r = redis.Redis(host='localhost', port=6379, db=0)
+    pubsub = r.pubsub(ignore_subscribe_messages=True)
+    
+    channel_name = f"test_channel_{receiver_id}"
+    await pubsub.subscribe(channel_name)
+    
+    print(f" [*] [ASYNC] Receiver {receiver_id} waiting for messages on {channel_name}")
+    
+    while running:
+        try:
+            message = await pubsub.get_message(timeout=0.1)
+            if message and message['type'] == 'message':
+                request_envelope = parse_envelope(message['data'])
+                message_id = request_envelope.message_id
+                print(f" [x] [ASYNC] Received message {message_id}")
+                
+                # Create ACK
+                response = create_ack_from_envelope(request_envelope, str(receiver_id))
+                setattr(response, 'async', True)
+                resp_str = serialize_envelope(response)
+                
+                # Send reply
+                if 'reply_to' in request_envelope.metadata:
+                    await r.publish(request_envelope.metadata['reply_to'], resp_str)
+        except Exception as e:
+            print(f"Error: {e}")
+            await asyncio.sleep(0.1)
+            
+    print(f" [x] [ASYNC] Receiver {receiver_id} shutting down")
+    await pubsub.close()
+    await r.close()
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--id', type=int, default=0)
     args = parser.parse_args()
     
-    receiver = RedisAsyncReceiver(args.id)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
-    # Setup signal handlers
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown(receiver)))
+    asyncio.run(run(args.id))
 
-    try:
-        await receiver.run()
-    except Exception as e:
-        print(f" [!] [ASYNC] Receiver error: {e}")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    main()

@@ -1,97 +1,133 @@
-/**
- * Redis Sender with targeted routing support for multi-receiver testing.
- * Routes each message to test_queue_{target} based on the target field.
- */
 #include <hiredis/hiredis.h>
 #include <iostream>
 #include <fstream>
 #include <string>
 #include <chrono>
-#include <vector>
-#include "../../include/json.hpp"
-#include "../../include/stats_collector.hpp"
+#include <thread>
+#include "../../utils/cpp/stats_collector.hpp"
+#include "../../utils/cpp/test_data_loader.hpp"
+#include "../../utils/cpp/message_helpers.hpp"
 
 using json = nlohmann::json;
-
-std::string generate_uuid() {
-    static int counter = 0;
-    return "cpp-redis-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "-" + std::to_string(++counter);
-}
+using message_helpers::get_current_time_ms;
 
 int main() {
-    redisContext *c = redisConnect("127.0.0.1", 6379);
-    if (c == NULL || c->err) {
-        if (c) {
-            std::cerr << "Error: " << c->errstr << std::endl;
-            redisFree(c);
-        } else {
-            std::cerr << "Can't allocate redis context" << std::endl;
-        }
-        return 1;
-    }
+    auto test_data = test_data_loader::loadTestData();
 
-    std::ifstream f("/home/tim/repos/test_data.json");
-    if (!f.is_open()) {
-        std::cerr << "Could not open test_data.json" << std::endl;
-        return 1;
-    }
-    json test_data = json::parse(f);
-
-    std::string callback_queue = "callback_" + generate_uuid();
+    MessageStats stats;
+    stats.set_metadata({
+        {"service", "Redis"},
+        {"language", "C++"},
+        {"async", false}
+    });
+    long long start_time = get_current_time_ms();
 
     std::cout << " [x] Starting transfer of " << test_data.size() << " messages..." << std::endl;
 
-    MessageStats stats;
-    long long global_start = get_current_time_ms();
-    stats.set_duration(global_start, 0);
+    redisContext *c_pub = redisConnect("127.0.0.1", 6379);
+    redisContext *c_sub = redisConnect("127.0.0.1", 6379);
 
-    for (auto& item : test_data) {
-        int target = item.value("target", 0);
-        std::string queue_name = "test_queue_" + std::to_string(target);
-        std::string message_id = item["message_id"].is_string() ? item["message_id"].get<std::string>() : std::to_string(item["message_id"].get<long long>());
-        
-        std::cout << " [x] Sending message " << message_id << " to target " << target << "..." << std::flush;
-        
-        long long msg_start = get_current_time_ms();
-        item["reply_to"] = callback_queue;
-        std::string body = item.dump();
-
-        redisReply *push_reply = (redisReply *)redisCommand(c, "RPUSH %s %b", queue_name.c_str(), body.c_str(), (size_t)body.size());
-        freeReplyObject(push_reply);
-
-        redisReply *pop_reply = (redisReply *)redisCommand(c, "BLPOP %s 0.04", callback_queue.c_str());
-
-            if (pop_reply && pop_reply->type == REDIS_REPLY_ARRAY && pop_reply->elements == 2) {
-                std::string reply_str = pop_reply->element[1]->str;
-                try {
-                    json resp_data = json::parse(reply_str);
-                
-                    auto resp_msg_id = resp_data["message_id"].is_string() ? resp_data["message_id"].get<std::string>() : std::to_string(resp_data["message_id"].get<long long>());
-                    if (resp_data["status"] == "ACK" && resp_msg_id == message_id) {
-                        long long msg_duration = get_current_time_ms() - msg_start;
-                        stats.record_message(true, msg_duration);
-                        std::cout << " [OK]" << std::endl;
-                } else {
-                    stats.record_message(false);
-                    std::cout << " [FAILED] Unexpected response" << std::endl;
-                    }
-                } catch (...) {
-                stats.record_message(false);
-                std::cout << " [FAILED] Parse error" << std::endl;
-                }
-            } else {
-            stats.record_message(false);
-            std::cout << " [FAILED] Timeout" << std::endl;
-        }
-        if (pop_reply) freeReplyObject(pop_reply);
+    if (c_pub == NULL || c_pub->err || c_sub == NULL || c_sub->err) {
+        std::cerr << "Redis connection failed" << std::endl;
+        if (c_pub) redisFree(c_pub);
+        if (c_sub) redisFree(c_sub);
+        return 1;
     }
 
-    long long global_end = get_current_time_ms();
-    stats.set_duration(global_start, global_end);
+    // Set a moderate timeout for connecting and other ops
+    struct timeval tv_default = {1, 0};
+    redisSetTimeout(c_pub, tv_default);
+    redisSetTimeout(c_sub, tv_default);
+
+    for (auto& item : test_data) {
+        std::string message_id = message_helpers::extract_message_id(item);
+        int target = item.value("target", 0);
+        std::cout << " [x] Sending message " << message_id << "... " << std::flush;
+        
+        std::string channel = "test_channel_" + std::to_string(target);
+        std::string reply_channel = "reply_" + message_id;
+        
+        // Subscribe to reply channel
+        redisReply *sub = (redisReply*)redisCommand(c_sub, "SUBSCRIBE %s", reply_channel.c_str());
+        if (sub) freeReplyObject(sub);
+        
+        // Create and send message
+        long long msg_start = get_current_time_ms();
+        MessageEnvelope envelope = message_helpers::create_data_envelope(item);
+        (*envelope.mutable_metadata())["reply_to"] = reply_channel;
+        std::string body = message_helpers::serialize_envelope(envelope);
+        
+        // Publish with retry to handle race condition where subscriber isn't ready
+        int published_to = 0;
+        for (int retry = 0; retry < 5 && published_to == 0; ++retry) {
+            redisReply *pub = (redisReply*)redisCommand(c_pub, "PUBLISH %s %b", channel.c_str(), body.data(), body.size());
+            if (pub) {
+                if (pub->type == REDIS_REPLY_INTEGER) {
+                    published_to = (int)pub->integer;
+                }
+                freeReplyObject(pub);
+            }
+            if (published_to == 0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        
+        // Wait for ACK (with 40ms timeout)
+        bool got_ack = false;
+        long long timeout_ms = 80;
+        
+        // Set a timeout on the context for redisGetReply
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = timeout_ms * 1000;
+        redisSetTimeout(c_sub, tv);
+        
+        while (!got_ack && (get_current_time_ms() - msg_start) < timeout_ms) {
+            redisReply *reply = nullptr;
+            int status = redisGetReply(c_sub, (void**)&reply);
+            
+            if (status == REDIS_OK && reply) {
+                if (reply->type == REDIS_REPLY_ARRAY && reply->elements >= 3) {
+                    if (reply->element[0]->type == REDIS_REPLY_STRING && 
+                        strcmp(reply->element[0]->str, "message") == 0) {
+                        std::string reply_str(reply->element[2]->str, reply->element[2]->len);
+                        
+                        MessageEnvelope resp_envelope;
+                        if (message_helpers::parse_envelope(reply_str, resp_envelope) && 
+                            message_helpers::is_valid_ack(resp_envelope, message_id)) {
+                            long long msg_duration = get_current_time_ms() - msg_start;
+                            stats.record_message(true, msg_duration);
+                            std::cout << " [OK]" << std::endl;
+                            got_ack = true;
+                        }
+                    }
+                }
+                freeReplyObject(reply);
+            } else if (status == REDIS_ERR) {
+                // Check if it's a timeout
+                if (c_sub->err == REDIS_ERR_IO && (errno == EAGAIN || errno == EINTR || errno == 0)) {
+                    // Timeout occurred, clear error to allow further commands (like UNSUBSCRIBE)
+                    c_sub->err = 0;
+                    memset(c_sub->errstr, 0, sizeof(c_sub->errstr));
+                }
+                break; // Exit waiting loop on error/timeout
+            }
+        }
+        
+        if (!got_ack) {
+            stats.record_message(false);
+            std::cout << " [FAILED]" << std::endl;
+        }
+        
+        // Unsubscribe from reply channel
+        // Reset timeout to something reasonable for unsubscribe
+        redisSetTimeout(c_sub, tv_default);
+        redisReply *unsub = (redisReply*)redisCommand(c_sub, "UNSUBSCRIBE %s", reply_channel.c_str());
+        if (unsub) freeReplyObject(unsub);
+    }
+
+    long long end_time = get_current_time_ms();
+    stats.set_duration(start_time, end_time);
     
     json report = stats.get_stats();
-    report["service"] = "Redis";
-    report["language"] = "C++";
 
     std::cout << "\nTest Results:" << std::endl;
     std::cout << "service: Redis" << std::endl;
@@ -99,16 +135,14 @@ int main() {
     std::cout << "total_sent: " << stats.sent_count << std::endl;
     std::cout << "total_received: " << stats.received_count << std::endl;
     std::cout << "duration_ms: " << stats.get_duration_ms() << std::endl;
-    if (report.contains("message_timing_stats")) {
-        std::cout << "message_timing_stats: " << report["message_timing_stats"].dump() << std::endl;
-    }
 
-    std::ofstream rf("report.txt", std::ios::app);
+    std::ofstream rf("logs/report.txt", std::ios::app);
     if (rf.good()) {
         rf << report.dump() << std::endl;
         rf.close();
     }
 
-    redisFree(c);
+    redisFree(c_pub);
+    redisFree(c_sub);
     return 0;
 }

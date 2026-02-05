@@ -16,7 +16,7 @@ def main():
         report_files = glob.glob('report*.json')
         if not report_files:
             # Fallback to report.txt if no JSON reports found
-            report_path = 'report.txt'
+            report_path = 'logs/stats_table_report.txt'
         else:
             # Sort by modification time to get the latest
             report_path = max(report_files, key=os.path.getmtime)

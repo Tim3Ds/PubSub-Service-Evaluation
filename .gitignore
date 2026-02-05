@@ -53,15 +53,13 @@ venv/
 env/
 ENV/
 
-# Logs and temporary
+# Logs and reports
+logs/
 *.log
 *.tmp
 *.pid
 *.dump
 *.rdb
-report*.json
-report*.txt
-run_log*.txt
 delete_prep.txt
 TODO.*
 *.tar.gz

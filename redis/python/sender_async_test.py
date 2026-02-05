@@ -1,98 +1,141 @@
 #!/usr/bin/env python3
-"""
-Redis Async Sender with targeted routing.
-Uses redis-py async support for concurrent RPC calls.
-"""
+"""Redis Python Sender - Async"""
+import sys
+import json
 import asyncio
 import redis.asyncio as redis
-import json
-import uuid
-import sys
-import os
-import time
+from pathlib import Path
 
-# Add harness to path for stats_collector
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../harness'))
-from stats_collector import MessageStats, get_current_time_ms
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
 
-class RedisAsyncSender:
-    def __init__(self):
-        self.r = redis.Redis(host='localhost', port=6379, db=0)
-    async def call(self, message_data):
-        target = message_data.get('target', 0)
-        queue_name = f"test_queue_{target}"
-        callback_queue = f"callback_{uuid.uuid4()}"
+from message_helpers import *
+from test_data_loader import load_test_data
+from stats_collector import MessageStats
+
+
+async def send_message_task(item):
+    """Send a single message asynchronously with its own connection."""
+    result = {'success': False, 'message_id': '', 'duration': 0, 'error': ''}
+    
+    # Each task gets its own Redis connection
+    r = None
+    pubsub = None
+    
+    try:
+        message_id = extract_message_id(item)
+        result['message_id'] = message_id
+        target = item.get('target', 0)
         
-        message_data['reply_to'] = callback_queue
-        await self.r.rpush(queue_name, json.dumps(message_data))
+        channel_name = f"test_channel_{target}"
+        reply_channel = f"reply_channel_{message_id}"
         
-        # BLPOP with timeout for the response
+        msg_start = get_current_time_ms()
+        
+        # Create dedicated connection for this task
+        r = redis.Redis(host='localhost', port=6379, db=0)
+        pubsub = r.pubsub()
+        
+        # Subscribe to reply channel
+        await pubsub.subscribe(reply_channel)
+        
+        # Create and send message
+        envelope = create_data_envelope(item)
+        envelope.metadata['reply_to'] = reply_channel
+        body = serialize_envelope(envelope)
+        
+        # Publish
+        await r.publish(channel_name, body)
+        
+        # Wait for reply with timeout
         try:
-            response = await self.r.blpop(callback_queue, timeout=0.2)
-            if response:
-                return response[1]
+            while True:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.01)
+                if message and message['type'] == 'message':
+                    try:
+                        resp_envelope = parse_envelope(message['data'])
+                        if is_valid_ack(resp_envelope, message_id):
+                            result['duration'] = get_current_time_ms() - msg_start
+                            result['success'] = True
+                            break
+                        else:
+                            # Ignore mismatched ACKs (usually late ACKs from previous messages)
+                            pass
+                    except Exception:
+                        pass
+                    
+                # Timeout check (200ms - doubled for reliability)
+                if (get_current_time_ms() - msg_start) > 200:
+                    result['error'] = 'Timeout'
+                    break
         except Exception as e:
-            print(f" [!] Error during call: {e}")
-        return None
-
-async def send_message(sender, item, stats):
-    target = item.get('target', 0)
-    msg_start = get_current_time_ms()
-    print(f" [x] [ASYNC] Sending message {item['message_id']} to target {target}...")
+            result['error'] = str(e)
+            
+    except Exception as e:
+        result['error'] = str(e)
+    finally:
+        # Clean up resources
+        if pubsub:
+            try:
+                await pubsub.unsubscribe(reply_channel)
+                await pubsub.aclose()
+            except:
+                pass
+        if r:
+            try:
+                await r.aclose()
+            except:
+                pass
     
-    response = await sender.call(item)
-    
-    if response:
-        try:
-            resp_data = json.loads(response)
-            if resp_data.get('status') == 'ACK' and resp_data.get('message_id') == item['message_id']:
-                msg_duration = get_current_time_ms() - msg_start
-                stats.record_message(True, msg_duration)
-                print(f" [OK] Message {item['message_id']} acknowledged")
-            else:
-                stats.record_message(False)
-                print(f" [FAILED] Unexpected response for {item['message_id']}: {response}")
-        except Exception as e:
-            stats.record_message(False)
-            print(f" [FAILED] Parse error for {item['message_id']}: {e}")
-    else:
-        stats.record_message(False)
-        print(f" [FAILED] Timeout for {item['message_id']}")
+    return result
 
-async def main():
-    sender = RedisAsyncSender()
-    
-    data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../test_data.json'))
-    with open(data_path, 'r') as f:
-        test_data = json.load(f)
 
+async def run():
+    test_data = load_test_data()
+    
     stats = MessageStats()
-    stats.start_time = get_current_time_ms()
-
-    print(f" [x] Starting transfer of {len(test_data)} messages (ASYNC)...")
-
-    tasks = [send_message(sender, item, stats) for item in test_data]
-    await asyncio.gather(*tasks)
-
-    stats.end_time = get_current_time_ms()
+    stats.set_metadata({
+        'service': 'Redis',
+        'language': 'Python',
+        'async': True
+    })
+    start_time = get_current_time_ms()
     
-    report = {
-        "service": "Redis",
-        "language": "Python",
-        "async": True,
-        **stats.get_stats()
-    }
-
+    print(f" [x] Starting ASYNC transfer of {len(test_data)} messages...")
+    
+    # Give receivers time to subscribe (Redis pub/sub doesn't queue messages)
+    await asyncio.sleep(0.5)
+    
+    # Process concurrently - each task gets its own connection
+    tasks = [send_message_task(item) for item in test_data]
+    results = await asyncio.gather(*tasks)
+    
+    for result in results:
+        if result['success']:
+            stats.record_message(True, result['duration'])
+            print(f" [OK] Message {result['message_id']} acknowledged")
+        else:
+            stats.record_message(False)
+            print(f" [FAILED] Message {result['message_id']}: {result['error']}")
+    
+    end_time = get_current_time_ms()
+    stats.set_duration(start_time, end_time)
+    
+    report = stats.get_stats()
+    
     print("\nTest Results (ASYNC):")
-    for k, v in report.items():
-        if k != 'message_timing_stats':
-            print(f"{k}: {v}")
+    print(f"total_sent: {stats.sent_count}")
+    print(f"total_received: {stats.received_count}")
+    print(f"duration_ms: {stats.get_duration_ms()}")
+    
+    with open('logs/report.txt', 'a') as f:
+        f.write(json.dumps(report) + '\n')
 
-    report_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../report.txt'))
-    with open(report_path, 'a') as f:
-        f.write(json.dumps(report) + "\n")
 
-    await sender.r.aclose()
+def main():
+    asyncio.run(run())
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

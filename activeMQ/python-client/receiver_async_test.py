@@ -1,75 +1,98 @@
 #!/usr/bin/env python3
-"""
-ActiveMQ Async Receiver.
-Uses stomp.py ConnectionListener.
-"""
-import stomp
-import json
-import argparse
-import signal
+"""ActiveMQ Python Receiver - Async"""
 import sys
-import time
+import signal
+import asyncio
+import stomp
+import threading
+from pathlib import Path
 
-class ActiveMQAsyncReceiver(stomp.ConnectionListener):
-    def __init__(self, receiver_id):
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
+
+from message_helpers import *
+
+running = True
+
+def signal_handler(sig, frame):
+    global running
+    running = False
+
+class AsyncRequestListener(stomp.ConnectionListener):
+    def __init__(self, conn, receiver_id):
+        self.conn = conn
         self.receiver_id = receiver_id
-        self.queue_name = f'/queue/test_queue_{receiver_id}'
-        self.messages_received = 0
-        self.conn = stomp.Connection(host_and_ports=[('localhost', 61613)])
-        self.conn.set_listener('receiver', self)
-        self.running = True
-
+        
     def on_message(self, frame):
-        self.messages_received += 1
-        data = json.loads(frame.body)
-        message_id = data.get('message_id')
-        reply_to = frame.headers.get('reply-to')
-        corr_id = frame.headers.get('correlation-id')
-        
-        print(f" [Receiver {self.receiver_id}] [ASYNC] Received message {message_id}")
-        
-        response = json.dumps({
-            "status": "ACK",
-            "message_id": message_id,
-            "receiver_id": self.receiver_id,
-            "async": True
-        })
-        
-        if reply_to:
-            self.conn.send(
-                destination=reply_to,
-                body=response,
-                headers={'correlation-id': corr_id}
-            )
+        # We need to process this off the stomp thread to be truly "async" 
+        # but for this test simple response on same thread is OK as STOMP lib handles threading
+        try:
+            # Body should now be bytes since auto_decode=False
+            body = frame.body
+            if isinstance(body, str):
+                body = body.encode('latin-1')  # latin-1 preserves bytes 0-255
+                
+            request_envelope = parse_envelope(body)
+            message_id = request_envelope.message_id
+            print(f" [x] [ASYNC] Received message {message_id}")
+            
+            # Create ACK
+            response = create_ack_from_envelope(request_envelope, str(self.receiver_id))
+            setattr(response, 'async', True)
+            resp_str = serialize_envelope(response)
+            
+            # Send reply
+            if 'reply-to' in frame.headers:
+                self.conn.send(
+                    destination=frame.headers['reply-to'],
+                    body=resp_str,
+                    headers={
+                        'correlation-id': frame.headers.get('correlation-id'),
+                        'content-type': 'application/octet-stream'
+                    }
+                )
+        except Exception as e:
+            print(f"Error: {e}")
 
-    def run(self):
-        self.conn.connect(wait=True)
-        self.conn.subscribe(destination=self.queue_name, id=1, ack='auto')
-        print(f" [*] [ASYNC] Receiver {self.receiver_id} awaiting messages on {self.queue_name}")
+async def run(receiver_id):
+    conn = stomp.Connection([('localhost', 61613)], auto_decode=False)
+    listener = AsyncRequestListener(conn, receiver_id)
+    conn.set_listener('', listener)
+    
+    # Run connect in executor to avoid blocking loop
+    await asyncio.get_event_loop().run_in_executor(None, lambda: conn.connect('admin', 'admin', wait=True))
+    
+    dest = f"/queue/test_queue_{receiver_id}"
+    conn.subscribe(destination=dest, id=1, ack='auto')
+    
+    print(f" [*] [ASYNC] Receiver {receiver_id} waiting for messages on {dest}")
+    
+    while running:
+        await asyncio.sleep(0.1)
         
-        while self.running:
-            time.sleep(1)
+    print(f" [x] [ASYNC] Receiver {receiver_id} shutting down")
+    conn.disconnect()
 
-def shutdown(receiver):
-    print(f" [x] [ASYNC] Shutdown requested for ActiveMQ receiver {receiver.receiver_id} (received {receiver.messages_received} messages)")
-    receiver.running = False
-    receiver.conn.disconnect()
-    sys.exit(0)
 
 def main():
-    parser = argparse.ArgumentParser(description='ActiveMQ Async Receiver')
-    parser.add_argument('--id', type=int, default=0, help='Receiver ID (0-31)')
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--id', type=int, default=0)
     args = parser.parse_args()
     
-    receiver = ActiveMQAsyncReceiver(args.id)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
-    signal.signal(signal.SIGINT, lambda s, f: shutdown(receiver))
-    signal.signal(signal.SIGTERM, lambda s, f: shutdown(receiver))
-
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        receiver.run()
-    except Exception as e:
-        print(f" [!] [ASYNC] Receiver error: {e}")
+        loop.run_until_complete(run(args.id))
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        loop.close()
+
 
 if __name__ == "__main__":
     main()

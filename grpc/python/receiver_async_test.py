@@ -1,52 +1,73 @@
 #!/usr/bin/env python3
-"""
-gRPC Async Receiver.
-Uses grpc.aio to handle requests.
-"""
+"""gRPC Python Receiver - Async"""
+import sys
+import signal
 import asyncio
 import grpc
-import test_data_pb2
-import test_data_pb2_grpc
-import argparse
-import signal
-import sys
+from pathlib import Path
 
-class TestDataService(test_data_pb2_grpc.TestDataServiceServicer):
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
+
+import messaging_pb2
+import messaging_pb2_grpc
+from message_helpers import *
+
+class AsyncMessagingServicer(messaging_pb2_grpc.MessagingServiceServicer):
     def __init__(self, receiver_id):
         self.receiver_id = receiver_id
-        self.messages_received = 0
+        
+    async def SendMessage(self, request, context):
+        message_id = request.message_id
+        print(f" [x] [ASYNC] Received message {message_id}")
+        
+        # Create ACK
+        response = create_ack_from_envelope(request, str(self.receiver_id))
+        setattr(response, 'async', True)
+        return response
 
-    async def TransferData(self, request, context):
-        self.messages_received += 1
-        print(f" [Receiver {self.receiver_id}] [ASYNC] Received message {request.message_id}")
-        return test_data_pb2.Ack(
-            status='ACK',
-            message_id=request.message_id,
-            receiver_id=self.receiver_id
-        )
-
-async def serve(receiver_id):
-    port = 50051 + receiver_id
+async def run(receiver_id, server_port):
     server = grpc.aio.server()
-    test_data_pb2_grpc.add_TestDataServiceServicer_to_server(
-        TestDataService(receiver_id), server)
+    messaging_pb2_grpc.add_MessagingServiceServicer_to_server(
+        AsyncMessagingServicer(receiver_id), server
+    )
+    port = server_port + receiver_id
     server.add_insecure_port(f'[::]:{port}')
-    print(f" [*] [ASYNC] Receiver {receiver_id} started on port {port}")
+    
+    print(f" [*] [ASYNC] Receiver {receiver_id} listening on port {port}")
     await server.start()
     
-    # Store for shutdown
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(server.stop(5)))
-        
-    await server.wait_for_termination()
+    try:
+        await server.wait_for_termination()
+    except asyncio.CancelledError:
+        await server.stop(0)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='gRPC Async Receiver')
-    parser.add_argument('--id', type=int, default=0, help='Receiver ID (0-31)')
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--id', type=int, default=0)
+    parser.add_argument('--server-port', type=int, default=50051)
     args = parser.parse_args()
     
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    task = loop.create_task(run(args.id, args.server_port))
+    
+    def signal_handler():
+        task.cancel()
+        
+    loop.add_signal_handler(signal.SIGINT, signal_handler)
+    loop.add_signal_handler(signal.SIGTERM, signal_handler)
+    
     try:
-        asyncio.run(serve(args.id))
-    except KeyboardInterrupt:
+        loop.run_until_complete(task)
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass
+    finally:
+        loop.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+package messaging;
+
+// Unified messaging protocol for all transmission layers
+// Provides consistent message envelope across gRPC, Redis, RabbitMQ, ZeroMQ, NATS, and ActiveMQ
+
+// Message envelope - wraps all payload types
+message MessageEnvelope {
+    string message_id = 1;           // Unique identifier for tracking
+    int32 target = 2;                // Target receiver ID (0-31)
+    string topic = 3;                // Topic/subject for routing
+    MessageType type = 4;            // Type of message payload
+    bytes payload = 5;               // Serialized payload for data messages
+    bool async = 6;                  // Whether this is an async operation
+    int64 timestamp = 7;             // Unix timestamp in milliseconds
+    RoutingMode routing = 8;         // How the message should be routed
+    QoSLevel qos = 9;                // Quality of Service level
+    map<string, string> metadata = 10; // Additional metadata for routing/filtering
+    Acknowledgment ack = 11;         // Direct ACK field for type=ACK messages
+}
+
+// Message types supported
+enum MessageType {
+    MESSAGE_TYPE_UNSPECIFIED = 0;
+    DATA_MESSAGE = 1;                // Generic data message
+    RPC_REQUEST = 2;                 // Request for RPC call
+    RPC_RESPONSE = 3;                // Response from RPC call
+    ACK = 4;                         // Acknowledgment message
+    CONTROL = 5;                     // Control message (shutdown, ping, etc.)
+    EVENT = 6;                       // Event notification
+}
+
+// Routing modes for different message patterns
+enum RoutingMode {
+    ROUTING_UNSPECIFIED = 0;
+    POINT_TO_POINT = 1;              // Direct to specific receiver
+    PUBLISH_SUBSCRIBE = 2;           // Broadcast to all subscribers
+    REQUEST_REPLY = 3;               // RPC-style request/reply
+    FANOUT = 4;                      // Send to all connected receivers
+}
+
+// Quality of Service levels
+enum QoSLevel {
+    QOS_UNSPECIFIED = 0;
+    AT_MOST_ONCE = 1;                // Fire and forget, no guarantees
+    AT_LEAST_ONCE = 2;               // Guaranteed delivery, may duplicate
+    EXACTLY_ONCE = 3;                // Guaranteed exactly-once delivery
+}
+
+// Data message payload - replaces TestDataItem
+message DataMessage {
+    string message_name = 1;
+    repeated string message_value = 2;
+}
+
+// RPC Request payload
+message RPCRequest {
+    string method = 1;
+    bytes arguments = 2;             // JSON or MessageEnvelope encoded arguments
+    int32 timeout_ms = 3;
+}
+
+// RPC Response payload
+message RPCResponse {
+    bool success = 1;
+    bytes result = 2;                // JSON or MessageEnvelope encoded result
+    string error_message = 3;
+}
+
+// Acknowledgment message
+message Acknowledgment {
+    string original_message_id = 1;
+    bool received = 2;
+    double latency_ms = 3;           // Changed to double for sub-ms precision
+    string receiver_id = 4;
+    string status = 5;               // "OK", "ERROR", "TIMEOUT", etc.
+}
+
+// Control message for system operations
+message ControlMessage {
+    ControlType type = 1;
+    string source = 2;
+    string destination = 3;
+    bytes data = 4;
+}
+
+// Control message types
+enum ControlType {
+    CONTROL_TYPE_UNSPECIFIED = 0;
+    PING = 1;
+    PONG = 2;
+    SHUTDOWN = 3;
+    HEALTH_CHECK = 4;
+    SUBSCRIBE = 5;
+    UNSUBSCRIBE = 6;
+}
+
+// Service definition for gRPC (replaces TestDataService)
+service MessagingService {
+    // Bidirectional streaming for high-throughput scenarios
+    rpc StreamMessages(stream MessageEnvelope) returns (stream MessageEnvelope);
+    
+    // Unary RPC for request/reply patterns
+    rpc SendMessage(MessageEnvelope) returns (MessageEnvelope);
+    
+    // Server-side streaming for subscriptions
+    rpc Subscribe(MessageEnvelope) returns (stream MessageEnvelope);
+}
+
+// Batch message for bulk transfers
+message BatchMessage {
+    repeated MessageEnvelope messages = 1;
+    int32 batch_id = 2;
+    bool is_last = 3;                // Indicates end of batch
+}
+
+// Batch response for bulk transfers
+message BatchResponse {
+    repeated Acknowledgment acknowledgments = 1;
+    int32 failed_count = 2;
+    string error_message = 3;
+}
+
+// Statistics message for performance monitoring
+message StatsMessage {
+    string service_name = 1;
+    int64 messages_sent = 2;
+    int64 messages_received = 3;
+    int64 messages_dropped = 4;
+    double avg_latency_ms = 5;
+    double throughput_msg_per_sec = 6;
+    int64 timestamp = 7;
+}
+

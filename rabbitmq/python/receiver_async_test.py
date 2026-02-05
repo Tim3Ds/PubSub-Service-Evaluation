@@ -1,78 +1,81 @@
 #!/usr/bin/env python3
-"""
-RabbitMQ Async Receiver.
-Uses aio-pika to handle requests.
-"""
+"""RabbitMQ Python Receiver - Async"""
+import sys
+import signal
 import asyncio
 import aio_pika
-import json
-import argparse
-import signal
-import sys
+from pathlib import Path
 
-class RabbitMQAsyncReceiver:
-    def __init__(self, receiver_id):
-        self.receiver_id = receiver_id
-        self.queue_name = f'test_queue_{receiver_id}'
-        self.messages_received = 0
-        self.connection = None
+# Add utils to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / 'utils' / 'python'))
 
-    async def run(self):
-        self.connection = await aio_pika.connect_robust("amqp://guest:guest@localhost/")
-        channel = await self.connection.channel()
-        await channel.set_qos(prefetch_count=1)
-        queue = await channel.declare_queue(self.queue_name)
+from message_helpers import *
 
-        print(f" [*] [ASYNC] Receiver {self.receiver_id} awaiting messages on {self.queue_name}")
+running = True
 
+def signal_handler(sig, frame):
+    global running
+    running = False
+
+async def run(receiver_id):
+    connection = await aio_pika.connect_robust("amqp://guest:guest@localhost/")
+    
+    async with connection:
+        channel = await connection.channel()
+        queue_name = f"test_queue_{receiver_id}"
+        queue = await channel.declare_queue(queue_name)
+        
+        print(f" [*] [ASYNC] Receiver {receiver_id} waiting for messages on {queue_name}")
+        
         async with queue.iterator() as queue_iter:
             async for message in queue_iter:
                 async with message.process():
-                    self.messages_received += 1
-                    data = json.loads(message.body)
-                    message_id = data.get('message_id')
-                    print(f" [Receiver {self.receiver_id}] [ASYNC] Received message {message_id}")
+                    request_envelope = parse_envelope(message.body)
+                    message_id = request_envelope.message_id
+                    print(f" [x] [ASYNC] Received message {message_id}")
                     
-                    response = json.dumps({
-                        "status": "ACK",
-                        "message_id": message_id,
-                        "receiver_id": self.receiver_id,
-                        "async": True
-                    })
+                    # Create ACK
+                    response = create_ack_from_envelope(request_envelope, str(receiver_id))
+                    setattr(response, 'async', True)
+                    resp_str = serialize_envelope(response)
                     
+                    # Send reply
                     await channel.default_exchange.publish(
                         aio_pika.Message(
-                            body=response.encode(),
+                            body=resp_str,
                             correlation_id=message.correlation_id,
+                            content_type='application/octet-stream'
                         ),
-                        routing_key=message.reply_to,
+                        routing_key=message.reply_to
                     )
+                
+                if not running:
+                    break
 
-async def shutdown(receiver):
-    print(f" [x] [ASYNC] Shutdown requested for RabbitMQ receiver {receiver.receiver_id} (received {receiver.messages_received} messages)")
-    if receiver.connection:
-        await receiver.connection.close()
-    sys.exit(0)
+    print(f" [x] [ASYNC] Receiver {receiver_id} shutting down")
 
-async def main():
-    parser = argparse.ArgumentParser(description='RabbitMQ Async Receiver')
-    parser.add_argument('--id', type=int, default=0, help='Receiver ID (0-31)')
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--id', type=int, default=0)
     args = parser.parse_args()
     
-    receiver = RabbitMQAsyncReceiver(args.id)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
-    # Setup signal handlers
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown(receiver)))
-
+    # Loop setup
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     try:
-        await receiver.run()
-    except Exception as e:
-        print(f" [!] [ASYNC] Receiver error: {e}")
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
+        loop.run_until_complete(run(args.id))
     except KeyboardInterrupt:
         pass
+    finally:
+        loop.close()
+
+
+if __name__ == "__main__":
+    main()
